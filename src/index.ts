@@ -60,7 +60,7 @@ export {
 	type ProcessState,
 	type SpawnedChild,
 } from './spawn.js';
-// The reaper is SPAWNED, not called: a component runs dist/harper-process-guard/reaper.js as its
+// The reaper is SPAWNED, not called: a component runs dist/reaper.js as its
 // own process. These exports exist so its behaviour can be tested without spawning one.
 export {
 	parseArgs as parseReaperArgs,

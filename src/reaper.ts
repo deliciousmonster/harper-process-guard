@@ -11,7 +11,7 @@
  * process outside the node is the only thing that can watch it die.
  *
  * SPAWNED, NEVER IMPORTED. A component runs it as
- * `node <package>/dist/harper-process-guard/reaper.js --...`. That is why it lives in the
+ * `node <package>/dist/reaper.js --...`. That is why it lives in the
  * package rather than being copied into each component: a copy per component drifts, and the
  * copy that drifted here reaped on liveness alone. It reaches its siblings by relative path,
  * which works because it is spawned from inside dist/; a bare specifier would not resolve from

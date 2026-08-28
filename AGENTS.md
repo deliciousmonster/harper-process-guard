@@ -36,7 +36,7 @@ thing that caught the unsoundness.
 
 ## Layout and commands
 
-Flat: sources at the root, compiled to `dist/`, tests under `test/`. `spawn.ts` is the
+Sources under `src/`, compiled flat to `dist/` (rootDir is `src`, so `src/reaper.ts` emits as `dist/reaper.js`), tests under `test/`. `spawn.ts` is the
 orchestrator - spawn, adoption detection, respawn, reaper launch - and its one structural rule is
 that the constrained spawn comes FROM THE CALLER, because Harper substitutes it per module graph
 and this package is loaded natively. Do not import child_process here for anything a component

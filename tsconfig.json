@@ -8,7 +8,7 @@
 		// invisible and the build dies on TS2591 at the first `process` reference.
 		"types": ["node"],
 		"outDir": "./dist",
-		"rootDir": "./",
+		"rootDir": "./src",
 		"strict": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
@@ -20,6 +20,6 @@
 		"resolveJsonModule": true,
 		"allowSyntheticDefaultImports": true
 	},
-	"include": ["*.ts"],
+	"include": ["src/**/*.ts"],
 	"exclude": ["node_modules", "dist", "test", "**/*.test.ts"]
 }
