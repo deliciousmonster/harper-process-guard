@@ -1,0 +1,25 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "NodeNext",
+		"lib": ["ES2022"],
+		// TypeScript 7 stopped auto-including every package under node_modules/@types.
+		// Without this the entire Node global surface (process, console, node:*) is
+		// invisible and the build dies on TS2591 at the first `process` reference.
+		"types": ["node"],
+		"outDir": "./dist",
+		"rootDir": "./",
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"declaration": true,
+		"declarationMap": true,
+		"sourceMap": true,
+		"moduleResolution": "NodeNext",
+		"resolveJsonModule": true,
+		"allowSyntheticDefaultImports": true
+	},
+	"include": ["*.ts"],
+	"exclude": ["node_modules", "dist", "test", "**/*.test.ts"]
+}
