@@ -1,10 +1,12 @@
 /**
- * Prettier configuration extending Harper shared config
- * @see https://prettier.io/docs/en/configuration.html
- * @type {import("prettier").Config}
+ * Harper's shared prettier settings, inlined. The plugin extends
+ * @harperfast/code-guidelines/prettier; this repo has no Harper devDependencies yet, so the
+ * values are restated here and must match, or the two repos drift on format alone.
  */
-import harperConfig from '@harperfast/code-guidelines/prettier';
-
 export default {
-	...harperConfig,
+	printWidth: 120,
+	quoteProps: 'consistent',
+	singleQuote: true,
+	trailingComma: 'es5',
+	useTabs: true,
 };

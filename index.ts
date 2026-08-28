@@ -46,6 +46,20 @@ import { describeSweep, sweepStaleLocks, type SweepAction, type SweepTarget } fr
 export { currentProcess, oncePerProcess, type OnceOutcome, type ProcessIdentity } from './once.js';
 export { describeSweep, sweepStaleLocks, type SweepAction, type SweepTarget } from './sweep.js';
 export { executableOf, identify, isAlive, readLock, type Identification } from './identity.js';
+// Spawn orchestration. The constrained spawn comes FROM THE CALLER, because Harper substitutes
+// it only for modules its loader evaluates and this package is loaded natively; see spawn.ts.
+export {
+	assertConstrainedSpawn,
+	fingerprint,
+	launchReaper,
+	preflightBinary,
+	startProcess,
+	type ConstrainedSpawn,
+	type GuardLog,
+	type ManagedProcess,
+	type ProcessState,
+	type SpawnedChild,
+} from './spawn.js';
 // The reaper is SPAWNED, not called: a component runs dist/harper-process-guard/reaper.js as its
 // own process. These exports exist so its behaviour can be tested without spawning one.
 export {

@@ -20,9 +20,7 @@ import { spawn } from 'node:child_process';
 import { importDist, makeTempDir, withTempDir } from '../support/harness.js';
 
 const { sweepStaleLocks, describeSweep, removeIfStill } = await importDist('sweep.js');
-const { isAlive, identify, readLock, identificationCanAuthoriseSignal } = await importDist(
-	'identity.js'
-);
+const { isAlive, identify, readLock, identificationCanAuthoriseSignal } = await importDist('identity.js');
 
 /** A live child running THIS node binary, so it identifies as `process.execPath`. */
 function spawnOwnBinary() {

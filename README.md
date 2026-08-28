@@ -43,11 +43,11 @@ From inside a component, after the binaries are resolved and before anything spa
 
 ```js
 const { report } = await bootstrap({
-  pidDir: join(harperRootPath(), 'pids'),
-  processes: [
-    { name: 'datadog-trace-agent', binaryPath: tracePath, version },
-    { name: 'datadog-agent', binaryPath: corePath, version },
-  ],
+	pidDir: join(harperRootPath(), 'pids'),
+	processes: [
+		{ name: 'datadog-trace-agent', binaryPath: tracePath, version },
+		{ name: 'datadog-agent', binaryPath: corePath, version },
+	],
 });
 for (const line of report) log.warn(`my-component: ${line}`);
 ```
