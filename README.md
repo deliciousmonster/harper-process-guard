@@ -106,8 +106,10 @@ already zero; it is blocked on being something to hand someone else without cave
       read identically by every thread.
 - [x] A second consumer. Five tests, including sixteen threads across two components racing in
       one pid directory. Collapsing the marker key back to a constant fails four of them.
-- [ ] The supervisor switched onto this reaper. `example/dd-reaper.js` is still its own copy, so
-      the drift this file exists to end is not yet ended. That is the next discrete step.
+- [x] The supervisor switched onto this reaper, and onto the rest of the lifecycle: spawn,
+      adoption, respawn and the reaper launch all live in `spawn.ts` now, with the constrained
+      spawn passed in by the caller because Harper grants it per module graph. The Datadog
+      plugin's own copy of all of it is deleted.
 - [ ] An integration test. The blocker turned out to be macOS-only: the suite needs loopback
       aliases `127.0.0.2`-`127.0.0.33`, which macOS requires be bound explicitly and Linux routes
       to `lo` natively, verified by binding `127.0.0.33` in a container with no aliases

@@ -36,7 +36,11 @@ thing that caught the unsoundness.
 
 ## Layout and commands
 
-Flat: sources at the root, compiled to `dist/`, tests under `test/`. `npm test` builds first.
+Flat: sources at the root, compiled to `dist/`, tests under `test/`. `spawn.ts` is the
+orchestrator - spawn, adoption detection, respawn, reaper launch - and its one structural rule is
+that the constrained spawn comes FROM THE CALLER, because Harper substitutes it per module graph
+and this package is loaded natively. Do not import child_process here for anything a component
+runs. `npm test` builds first.
 `test/support/harness.js` is shared test scaffolding carried over from the plugin.
 
 The e2e suite spawns real processes and real worker threads on purpose; a version that mocks
