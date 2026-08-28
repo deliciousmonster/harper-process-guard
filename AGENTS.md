@@ -40,7 +40,12 @@ Sources under `src/`, compiled flat to `dist/` (rootDir is `src`, so `src/reaper
 orchestrator - spawn, adoption detection, respawn, reaper launch - and its one structural rule is
 that the constrained spawn comes FROM THE CALLER, because Harper substitutes it per module graph
 and this package is loaded natively. Do not import child_process here for anything a component
-runs. `npm test` builds first.
+runs. `index.ts` composes it all into the one-call `bootstrap()`, whose ordering is load-bearing:
+resolve before the sweep (the sweep needs binary paths to adjudicate locks), configs after the
+barrier, the reaper before any verify (a probe can wait 30 seconds, and a node killed inside that
+window must not orphan the children). The lifecycle suite has a MUTATION test on each ordering.
+`bootstrap()` resolves its own `dist/reaper.js` through `import.meta.url`, so index.js and
+reaper.js must stay siblings in `dist/`. `npm test` builds first.
 `test/support/harness.js` is shared test scaffolding carried over from the plugin.
 
 The e2e suite spawns real processes and real worker threads on purpose; a version that mocks

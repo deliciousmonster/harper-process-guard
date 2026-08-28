@@ -1,16 +1,4 @@
-/**
- * Spawn orchestration for the processes a Harper component owns.
- *
- * Everything here was carried out of the Datadog supervisor, where each rule was paid for by a
- * real defect; the comments name them because none of the rules is visible from the code alone.
- *
- * THE SPAWN COMES FROM THE CALLER. Harper substitutes its constrained `child_process` - the
- * mandatory spawn `name`, the allowlist, the PID-file singleton - only for modules its own
- * loader evaluates, which means modules reached by RELATIVE import from the component entry.
- * This package is imported by bare specifier and loaded natively, so a spawn imported here
- * would be stock Node: no lock, no allowlist, one process per worker thread. The caller passes
- * its own constrained spawn in, and `assertConstrainedSpawn` exists to prove it really is one.
- */
+// Spawn orchestration; the constrained spawn comes FROM THE CALLER, because Harper substitutes it per module graph.
 import { accessSync, constants, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -61,39 +49,21 @@ export interface ProcessState {
 	exited?: boolean;
 	error?: string;
 	respawnAttempts?: number;
+	/** Set by bootstrap() from the caller's verify(): whether the process proved it does its job. */
+	verified?: boolean;
+	verifyDetail?: string;
 }
 
 const RESPAWN_MAX_ATTEMPTS = 5;
 const RESPAWN_BASE_MS = 1000;
 const RESPAWN_CAP_MS = 30_000;
 
-/**
- * Numeric fingerprint of everything that should force replacement of a running process.
- *
- * Harper compares this against line 2 of the PID file and, on a mismatch, SIGTERMs the running
- * process and re-acquires the lock. Without it, a process left over from a previous boot is
- * adopted forever - the PID files sit on a persistent volume and outlive the container that
- * created them - and the sweep in this package leaves a matching-version process alone on
- * purpose, because `harper restart` hands children to the replacement through exactly that match.
- *
- * It must be a NUMBER. Harper reads the recorded value with `parseInt()` and compares with
- * `!==`, so a string version never equals its own recorded value and every thread would kill
- * and respawn the process, forever.
- */
+/** Fingerprint of what forces replacement of a running process; a NUMBER inside 2^31, because Harper parseInt()s it. */
 export function fingerprint(...parts: unknown[]): number {
-	// >>> 1 keeps it inside 2^31 so it round-trips through parseInt() unchanged.
 	return createHash('sha256').update(parts.map(String).join('\0')).digest().readUInt32BE(0) >>> 1;
 }
 
-/**
- * Refuse a binary Harper cannot start, with the reason an operator can act on.
- *
- * Harper's allowlist test is `ALLOWED_COMMANDS.has(command.split(" ")[0])`, so a path containing
- * a space can never be allowlisted by any configuration, and failing on it explicitly stops the
- * error reading as a plain "not allowed" that sends people to edit a config that cannot help.
- * A missing binary must not reach spawn either: Harper would create the PID lock file, get a
- * child with pid === undefined, and throw a TypeError while writing that PID.
- */
+/** Refuse a binary Harper cannot start: a spaced path no allowlist entry can match, or a file that is not there. */
 export function preflightBinary(title: string, binaryPath: string): void {
 	if (binaryPath.includes(' ')) {
 		throw new Error(
@@ -115,23 +85,13 @@ export function preflightBinary(title: string, binaryPath: string): void {
 /** A command that must not exist, so permitting it proves the spawn is not constrained. */
 const PROBE_COMMAND = 'harper-process-guard-spawn-probe-must-not-exist';
 
-/**
- * Prove the spawn the caller handed over really is Harper's constrained one.
- *
- * Only Harper's wrapper throws synchronously from spawn() at all. Node's real spawn accepts the
- * bogus command and reports ENOENT later as an 'error' event, which unhandled becomes an
- * uncaught exception, so the probe child gets a listener and an unref before this returns.
- */
+/** Prove the spawn is Harper's constrained one; only Harper's wrapper throws synchronously from spawn(). */
 export function assertConstrainedSpawn(
 	spawn: ConstrainedSpawn,
 	log: GuardLog,
-	/**
-	 * Appended to the not-active report. The generic message says "fail to bind their ports";
-	 * the original this was carried from named the port ("all but one trace-agent will fail
-	 * to bind 127.0.0.1:8126"), and a review found the caller had nowhere to put that back.
-	 */
-	notInterceptedHint?: string
+	hint?: string | { notInterceptedHint?: string }
 ): { intercepted: boolean; detail: string } {
+	const notInterceptedHint = typeof hint === 'string' ? hint : hint?.notInterceptedHint;
 	let child: SpawnedChild;
 	try {
 		child = spawn(PROBE_COMMAND, [], {
@@ -157,6 +117,7 @@ export function assertConstrainedSpawn(
 		return { intercepted: true, detail: message };
 	}
 
+	// The probe's ENOENT arrives later as an 'error' event, which unhandled kills the worker thread.
 	child.on('error', () => {});
 	child.unref();
 	log.error(
@@ -174,35 +135,24 @@ export function assertConstrainedSpawn(
 	return { intercepted: false, detail: 'spawn of a bogus command was permitted' };
 }
 
-/**
- * Start one process through Harper's lock, and keep it started.
- *
- * Synchronous by design: Harper's spawn either throws, returns a real ChildProcess, or returns
- * the adoption wrapper, all synchronously, and the caller needs the state before it decides
- * what to verify.
- */
+/** Start one process through Harper's lock and keep it started; synchronous because Harper's spawn is. */
 export function startProcess(
 	spawn: ConstrainedSpawn,
 	descriptor: ManagedProcess,
-	{ version, log, logDirHint }: { version: number; log: GuardLog; logDirHint?: string },
+	{ version, log, logDirHint }: { version?: number; log: GuardLog; logDirHint?: string },
 	existingState: ProcessState | null = null,
 	attempt = 0
 ): ProcessState {
 	const title = descriptor.title ?? descriptor.name;
+	// A respawn reuses the caller's state object, so a status endpoint holding it keeps describing what runs.
 	const state: ProcessState = existingState ?? {
 		name: descriptor.name,
 		title,
 		binaryPath: descriptor.binaryPath,
 		started: false,
 	};
-	// A respawn reuses the caller's state object rather than returning a new one, so a status
-	// endpoint holding references keeps describing the process that is actually running.
 	state.respawnAttempts = attempt;
-	// Reuse has to clear the last incarnation's death, or the promise above is broken: exited
-	// stayed true and error stayed set across a respawn, so one early exit read as a dead
-	// process beside a live pid for the node's whole life, and a caller's give-up probe
-	// latched on it (the review traced a receiverBound stuck false to exactly this). pid and
-	// adopted refresh below on success; these two nothing else resets.
+	// Clear the last incarnation's death, or one early exit reads as a dead process beside a live pid forever.
 	state.exited = undefined;
 	state.error = undefined;
 
@@ -218,14 +168,9 @@ export function startProcess(
 	let child: SpawnedChild;
 	try {
 		child = spawn(descriptor.binaryPath, descriptor.args, {
-			// Required by Harper, and the PID lock filename.
 			name: descriptor.name,
-			// See fingerprint(): a number, never a string.
 			version,
-			// Never piped. A pipe ties the process to the worker thread that won the spawn
-			// race: when harper dev recycles that thread on a save, the child dies on SIGPIPE
-			// at its next write, the PID file survives it, and every later thread adopts the
-			// corpse and reports "already running" forever.
+			// Never piped: a pipe ties the child to the winning thread, which harper dev recycles on every save.
 			stdio: ['ignore', 'ignore', 'ignore'],
 			env: process.env,
 		});
@@ -243,15 +188,9 @@ export function startProcess(
 	state.pid = child.pid;
 	state.started = true;
 
-	// Attached before anything else touches the child, and before the early return below.
-	// Harper attaches only its own 'exit' listener, and an unhandled 'error' on a ChildProcess
-	// becomes an uncaught exception that takes the worker thread with it. The event is
-	// asynchronous, so returning from here without this listener is a crash waiting on the
-	// next tick.
+	// Attached before anything else: an unhandled 'error' on a ChildProcess kills the worker thread on the next tick.
 	child.on('error', (error) => {
-		// ENOEXEC is the one spawn failure preflightBinary() cannot see coming: X_OK passes
-		// for a binary built for another architecture, and the bare message is "Exec format
-		// error".
+		// ENOEXEC is the one failure preflight cannot see: X_OK passes for a binary built for another architecture.
 		const detail =
 			error.code === 'ENOEXEC'
 				? `${descriptor.binaryPath} is not executable code for this machine (ENOEXEC). A ` +
@@ -261,18 +200,14 @@ export function startProcess(
 		log.error(`process guard: the ${title} failed to execute: ${detail}`);
 	});
 
-	// Every loser of the PID-file race gets an ExistingProcessWrapper: an EventEmitter with
-	// pid, kill(), unref() and an 'exit' event. Detected by the absence of `spawnargs`, which
-	// every real ChildProcess carries and the wrapper does not; stdout is not a safe tell,
-	// because a winner spawned with its stdio ignored also has a null stdout.
+	// The adoption wrapper lacks `spawnargs`; stdout is not a tell, since an ignored-stdio winner also has none.
 	state.adopted = !Array.isArray(child.spawnargs);
 	if (state.adopted) {
 		log.info(
 			`process guard: the ${title} is already running on this node (pid ${child.pid}); ` +
 				`this thread joined it instead of starting a second one.`
 		);
-		// The wrapper polls the process once a second on a setInterval it never unref'd,
-		// pinning the worker's event loop. unref() is what clears that interval.
+		// The wrapper polls on a setInterval it never unref'd; unref is what clears it.
 		child.unref();
 		return state;
 	}
@@ -282,15 +217,7 @@ export function startProcess(
 			`${descriptor.args.join(' ')}.${logDirHint ? ` It logs to ${logDirHint}.` : ''}`
 	);
 
-	/**
-	 * Restart after a death nothing else recovers from. Only the thread that WON the spawn
-	 * race reaches here: adopting threads unref() and return before this handler is attached,
-	 * so one death produces one restart rather than one per worker.
-	 *
-	 * The delay backs off so a binary that dies immediately cannot spin, and the PID-file lock
-	 * still arbitrates, so a racing worker load during the delay simply wins and this attempt
-	 * adopts instead.
-	 */
+	/** Restart with backoff after a death nothing else recovers from; only the winning thread ever gets here. */
 	function respawn(reason: string): void {
 		if (attempt + 1 > RESPAWN_MAX_ATTEMPTS) {
 			log.error(
@@ -305,26 +232,17 @@ export function startProcess(
 				`(attempt ${attempt + 1} of ${RESPAWN_MAX_ATTEMPTS}).`
 		);
 		const timer = setTimeout(() => {
-			// Deliberately not behind the startup barrier. This fires after startup, for a
-			// process THIS thread started and watched die, and Harper's own exit handler has
-			// already unlinked its lock. There is no stale lock to adjudicate.
 			startProcess(spawn, descriptor, { version, log, logDirHint }, state, attempt + 1);
 		}, delay);
-		// Never hold the worker's event loop open for a restart: a node shutting down must not
-		// wait on this, and the process outliving the node is the reaper's job, not a timer's.
+		// A node shutting down must not wait on a restart; outliving the node is the reaper's job, not a timer's.
 		timer.unref?.();
 	}
 
 	child.on('exit', (code, signal) => {
-		// Read by callers whose own waits have nothing left to wait for once the process they
-		// were watching is gone.
 		state.exited = true;
 		if (signal) {
 			const stopped = `process guard: the ${title} was terminated by ${signal}.`;
-			// SIGTERM/SIGINT/SIGHUP are someone asking it to stop - the reaper stopping the
-			// node, or an operator - and restarting into that would fight the shutdown. SIGKILL
-			// is usually the OOM killer and the rest are crashes; those are the case nothing
-			// else recovers from.
+			// A stop signal is someone shutting it down; SIGKILL and the rest are crashes nothing else recovers from.
 			if (signal === 'SIGTERM' || signal === 'SIGINT' || signal === 'SIGHUP') {
 				log.warn(stopped);
 			} else {
@@ -359,23 +277,13 @@ export interface ReaperState {
 	error?: string;
 }
 
-/**
- * Start the guard's reaper, or say why it was not started.
- *
- * The command has to satisfy Harper's allowlist, an exact string compare against
- * `command.split(' ')[0]`. `process.execPath` is tried first because it names this exact Node
- * and cannot be shadowed by PATH; bare `node` is the fallback and works with no configuration,
- * since it is in Harper's own default allowlist. A refused spawn throws synchronously and
- * creates no PID file, so trying both costs nothing.
- *
- * Never fatal. Without a reaper the processes run exactly as they would have, and outlive the
- * node exactly as they would have; that is worth a warning, not an outage.
- */
+/** Start the guard's reaper, or say why it was not; never fatal, since without one the processes merely outlive the node. */
 export function launchReaper(
 	spawn: ConstrainedSpawn,
 	{
 		reaperScript,
 		rootPath,
+		pidDir = join(rootPath, 'pids'),
 		processes,
 		version,
 		log,
@@ -388,8 +296,10 @@ export function launchReaper(
 		/** Absolute path of this package's dist/reaper.js, resolved by the caller through the package. */
 		reaperScript: string;
 		rootPath: string;
+		/** Where the PID locks live. Defaults to `<rootPath>/pids`. */
+		pidDir?: string;
 		processes: ProcessState[];
-		version: number;
+		version?: number;
 		log: GuardLog;
 		logFile?: string;
 		/** Harper spawn name for the reaper itself, which is also ITS lock filename. */
@@ -397,11 +307,7 @@ export function launchReaper(
 		restartGraceMs?: number;
 		/** Appended to the started log, naming what the reaper stops in the caller's terms. */
 		startedHint?: string;
-		/**
-		 * Appended wherever a missing or dead reaper means the processes outlive the node.
-		 * Genericization dropped the original's "and 127.0.0.1:8126 stays bound"; this is
-		 * where the caller puts that sentence back.
-		 */
+		/** Appended wherever a missing or dead reaper means the processes outlive the node. */
 		outliveHint?: string;
 	}
 ): ReaperState {
@@ -426,11 +332,9 @@ export function launchReaper(
 		return state;
 	}
 
-	const pidDir = join(rootPath, 'pids');
 	const args = [
 		reaperScript,
-		// The worker thread's process.pid IS the main Harper process: threads share a process.
-		// That is also the pid `harper stop` signals and the one the reaper becomes a child of.
+		// A worker thread's process.pid IS the main Harper process: threads share a process.
 		'--harper-pid',
 		String(process.pid),
 		'--hdb-pid-file',
@@ -440,9 +344,7 @@ export function launchReaper(
 		'--self-pid-file',
 		join(pidDir, `${name}.pid`),
 		...(logFile ? ['--log', logFile] : []),
-		// Base64 JSON per target: the fields are absolute paths, and a `pidFile:pid` spelling
-		// split on the last colon, which any path containing one breaks. The binary path is
-		// what lets the reaper identify a process before signalling it.
+		// Base64 JSON per target: the fields are absolute paths, which a colon-split spelling breaks.
 		...running.flatMap((p) => [
 			'--target',
 			Buffer.from(
@@ -451,6 +353,7 @@ export function launchReaper(
 		]),
 	];
 
+	// process.execPath first because PATH cannot shadow it; bare `node` is in Harper's default allowlist.
 	let child: SpawnedChild | undefined;
 	const refusals: string[] = [];
 	for (const command of [process.execPath, 'node']) {
@@ -483,10 +386,7 @@ export function launchReaper(
 	state.pid = child.pid;
 	state.started = true;
 
-	// Adoption applies to the reaper too: one per node, whoever won. This branch must return
-	// before the started line: the carry-over fell through instead, so every losing thread
-	// logged "reaper started" (a review counted eight for one reaper, each claiming its own
-	// target count) and the adopted flag never reached the caller's status.
+	// Must return before the started line, or every losing thread logs "reaper started" for one reaper.
 	state.adopted = !Array.isArray(child.spawnargs);
 	if (state.adopted) {
 		log.info(
@@ -502,11 +402,7 @@ export function launchReaper(
 		`process guard: reaper started (pid ${child.pid}), watching ${running.length} ` +
 			`process(es).${startedHint ? ` ${startedHint}` : ''}`
 	);
-	// A reaper that dies must say so in the log of the node it was watching. The carry-over
-	// dropped this listener, so a crashed reaper left no line anywhere and `harper stop`
-	// silently leaked every watched process; a silently absent watcher is the failure class
-	// this package exists to end. A signal is someone stopping it and code 0 is a clean
-	// finish, so only a real crash warns.
+	// A crashed reaper must say so in the log of the node it watched; a signal or code 0 is someone stopping it.
 	child.on('exit', (code, signal) => {
 		if (signal || code === 0) return;
 		log.warn(

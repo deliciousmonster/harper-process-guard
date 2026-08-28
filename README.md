@@ -39,30 +39,49 @@ every component at once. This is the part a component can do for itself in the m
 
 ## Using it
 
-From inside a component, after the binaries are resolved and before anything spawns:
+One call from the component entry runs the whole lifecycle. Hand it Harper's constrained `spawn`
+from your own `import { spawn } from 'node:child_process'`, because Harper substitutes that only
+per module graph and this package is loaded natively:
 
 ```js
-const { report } = await bootstrap({
-	pidDir: join(harperRootPath(), 'pids'),
+import { bootstrap, pollEndpoint, readHarperRootPath } from '@deliciousmonster/harper-process-guard';
+import { spawn } from 'node:child_process';
+
+const status = await bootstrap({
+	spawn,
+	log: logger,
+	rootPath: readHarperRootPath() ?? process.env.ROOTPATH,
+	fingerprintParts: [configText, process.env.DD_API_KEY],
+	configFiles: { [configPath]: renderedYaml },
 	processes: [
-		{ name: 'datadog-trace-agent', binaryPath: tracePath, version },
-		{ name: 'datadog-agent', binaryPath: corePath, version },
+		{
+			name: 'datadog-trace-agent',
+			resolve: () => resolveTraceAgentPath(),
+			args: ['run', '-c', configPath],
+			verify: async () => ({ ok: (await pollEndpoint({ url: infoUrl })) !== null, detail: '...' }),
+		},
 	],
+	reaper: { name: 'datadog-agent-reaper' },
 });
-for (const line of report) log.warn(`my-component: ${line}`);
 ```
 
-Then spawn as usual, through Harper's own `spawn`. This never spawns anything: Harper's spawn is
-what enforces the binary allowlist and takes the lock, and wrapping it would put a second opinion
-between a component and the runtime hosting it.
+In order: it proves the spawn really is Harper's, resolves each binary, sweeps stale locks once
+per node behind a barrier, writes the config files atomically, starts each process through
+Harper's lock, launches the reaper, and only then runs each `verify`, so a node killed during a
+30-second probe cannot orphan the children. The returned status carries the sweep report, one
+state per process with the verify verdicts attached, and the reaper's.
 
-`version` is the same fingerprint you pass to `spawn`, and it matters. Harper adopts a lock whose
+Without `spawn` the call is the sweep alone, and never starts anything: Harper's spawn is what
+enforces the binary allowlist and takes the lock, and the caller keeps composing the rest itself.
+
+`fingerprintParts` become the `version` on every spawn, and it matters. Harper adopts a lock whose
 version still matches, which is what `harper restart` relies on to hand running children to a
 replacement node. Without it the guard cannot tell a process you are about to inherit from one
 nobody owns, and stopping the first drops whatever it was carrying.
 
-Nothing here logs. A component's warnings have to reach `hdb.log`, and a package writing to its
-own console reaches nobody, so the verdict comes back as strings for the caller to place.
+Everything is said through the `log` you pass, which defaults to a no-op: a component's warnings
+have to reach `hdb.log`, and a package writing to its own console reaches nobody. The sweep
+verdict also comes back as strings for the caller to place.
 
 ## Two rules it will not break
 
