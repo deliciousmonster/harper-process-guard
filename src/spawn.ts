@@ -124,7 +124,13 @@ const PROBE_COMMAND = 'harper-process-guard-spawn-probe-must-not-exist';
  */
 export function assertConstrainedSpawn(
 	spawn: ConstrainedSpawn,
-	log: GuardLog
+	log: GuardLog,
+	/**
+	 * Appended to the not-active report. The generic message says "fail to bind their ports";
+	 * the original this was carried from named the port ("all but one trace-agent will fail
+	 * to bind 127.0.0.1:8126"), and a review found the caller had nowhere to put that back.
+	 */
+	notInterceptedHint?: string
 ): { intercepted: boolean; detail: string } {
 	let child: SpawnedChild;
 	try {
@@ -162,7 +168,8 @@ export function assertConstrainedSpawn(
 			`import from the component entry (a bare npm specifier is loaded natively unless the ` +
 			`package depends on harper); child_process was pulled in with require() instead of ` +
 			`import (Harper's CJS require does not apply the substitution); or ` +
-			`applications.moduleLoader is set to "native", which disables the application loader.`
+			`applications.moduleLoader is set to "native", which disables the application loader.` +
+			(notInterceptedHint ? ` ${notInterceptedHint}` : '')
 	);
 	return { intercepted: false, detail: 'spawn of a bogus command was permitted' };
 }
@@ -191,6 +198,13 @@ export function startProcess(
 	// A respawn reuses the caller's state object rather than returning a new one, so a status
 	// endpoint holding references keeps describing the process that is actually running.
 	state.respawnAttempts = attempt;
+	// Reuse has to clear the last incarnation's death, or the promise above is broken: exited
+	// stayed true and error stayed set across a respawn, so one early exit read as a dead
+	// process beside a live pid for the node's whole life, and a caller's give-up probe
+	// latched on it (the review traced a receiverBound stuck false to exactly this). pid and
+	// adopted refresh below on success; these two nothing else resets.
+	state.exited = undefined;
+	state.error = undefined;
 
 	try {
 		if (!descriptor.binaryPath) throw new Error('its path could not be resolved');
@@ -334,6 +348,17 @@ export function startProcess(
 	return state;
 }
 
+/** What launchReaper reports. `adopted` is what separates launching a reaper from joining one. */
+export interface ReaperState {
+	name: string;
+	started: boolean;
+	/** True when this thread lost the reaper's own PID-file race and joined the winner's. */
+	adopted?: boolean;
+	pid?: number;
+	command?: string;
+	error?: string;
+}
+
 /**
  * Start the guard's reaper, or say why it was not started.
  *
@@ -357,6 +382,8 @@ export function launchReaper(
 		logFile,
 		name = 'harper-process-guard-reaper',
 		restartGraceMs = 8000,
+		startedHint,
+		outliveHint,
 	}: {
 		/** Absolute path of this package's dist/reaper.js, resolved by the caller through the package. */
 		reaperScript: string;
@@ -368,9 +395,17 @@ export function launchReaper(
 		/** Harper spawn name for the reaper itself, which is also ITS lock filename. */
 		name?: string;
 		restartGraceMs?: number;
+		/** Appended to the started log, naming what the reaper stops in the caller's terms. */
+		startedHint?: string;
+		/**
+		 * Appended wherever a missing or dead reaper means the processes outlive the node.
+		 * Genericization dropped the original's "and 127.0.0.1:8126 stays bound"; this is
+		 * where the caller puts that sentence back.
+		 */
+		outliveHint?: string;
 	}
-): { name: string; started: boolean; pid?: number; command?: string; error?: string } {
-	const state: { name: string; started: boolean; pid?: number; command?: string; error?: string } = {
+): ReaperState {
+	const state: ReaperState = {
 		name,
 		started: false,
 	};
@@ -385,7 +420,8 @@ export function launchReaper(
 		log.error(
 			`process guard: cannot start the reaper: ${reaperScript} is missing. It ships inside ` +
 				`this package, so this means the package is installed without its build output. ` +
-				`Without it the processes keep running after this node stops.`
+				`Without it the processes keep running after this node stops.` +
+				(outliveHint ? ` ${outliveHint}` : '')
 		);
 		return state;
 	}
@@ -437,16 +473,47 @@ export function launchReaper(
 		log.warn(
 			`process guard: Harper refused to start the reaper (${state.error}). Add \`node\` ` +
 				`back to applications.allowedSpawnCommands, or add ${process.execPath}. Without it ` +
-				`the processes keep running after \`harper stop\`.`
+				`the processes keep running after \`harper stop\`.` +
+				(outliveHint ? ` ${outliveHint}` : '')
 		);
 		return state;
 	}
 
 	child.on('error', (error) => log.error(`process guard: the reaper failed to execute: ${error.message}`));
-	// Adoption applies to the reaper too: one per node, whoever won.
-	if (!Array.isArray(child.spawnargs)) child.unref();
 	state.pid = child.pid;
 	state.started = true;
-	log.info(`process guard: reaper started (pid ${child.pid}), watching ${running.length} process(es).`);
+
+	// Adoption applies to the reaper too: one per node, whoever won. This branch must return
+	// before the started line: the carry-over fell through instead, so every losing thread
+	// logged "reaper started" (a review counted eight for one reaper, each claiming its own
+	// target count) and the adopted flag never reached the caller's status.
+	state.adopted = !Array.isArray(child.spawnargs);
+	if (state.adopted) {
+		log.info(
+			`process guard: the ${name} is already running on this node (pid ${child.pid}); this ` +
+				`thread joined it instead of starting a second one.`
+		);
+		// The wrapper polls on a setInterval it never unref'd; unref is what clears it.
+		child.unref();
+		return state;
+	}
+
+	log.info(
+		`process guard: reaper started (pid ${child.pid}), watching ${running.length} ` +
+			`process(es).${startedHint ? ` ${startedHint}` : ''}`
+	);
+	// A reaper that dies must say so in the log of the node it was watching. The carry-over
+	// dropped this listener, so a crashed reaper left no line anywhere and `harper stop`
+	// silently leaked every watched process; a silently absent watcher is the failure class
+	// this package exists to end. A signal is someone stopping it and code 0 is a clean
+	// finish, so only a real crash warns.
+	child.on('exit', (code, signal) => {
+		if (signal || code === 0) return;
+		log.warn(
+			`process guard: the ${name} exited with code ${code}. The processes it watched will ` +
+				`now outlive this node; \`harper stop\` leaves them running.` +
+				(outliveHint ? ` ${outliveHint}` : '')
+		);
+	});
 	return state;
 }

@@ -220,3 +220,113 @@ test('the reaper falls back from execPath to node when the first command is refu
 		assert.equal(state.command, 'node');
 		assert.equal(state.started, true);
 	}));
+
+test('a respawn clears exited and error left by the dead incarnation', async () => {
+	const spawns = [];
+	const spawn = () => {
+		const child = wonChild(100 + spawns.length);
+		spawns.push(child);
+		return child;
+	};
+	const state = startProcess(spawn, PROC(process.execPath), { version: 1, log: recordingLog() });
+	// An earlier failure recorded on the reused object, the way a real sequence leaves one.
+	state.error = 'left over from an earlier failure';
+	spawns[0].emit('exit', 1, null);
+	assert.equal(state.exited, true, 'the death must be visible before the respawn');
+
+	await new Promise((r) => setTimeout(r, 1200));
+	assert.equal(spawns.length, 2, 'exit code 1 must produce one respawn');
+	// The reused state has to describe the process actually running. Pre-fix, exited stayed
+	// true and error stayed set beside the replacement pid, so one early death read as a dead
+	// process for the rest of the node's life and latched any caller probe that gave up on it.
+	assert.equal(state.pid, spawns[1].pid);
+	assert.ok(!state.exited, 'exited survived the respawn');
+	assert.ok(!state.error, 'error survived the respawn');
+});
+
+test('a lost reaper race: adopted, the joined log, unref, and no started line', () =>
+	withTempDir('orch-reaper-adopt-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const child = adoptedChild(555);
+		const log = recordingLog();
+		const state = launchReaper(() => child, {
+			reaperScript: script,
+			rootPath: dir,
+			processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+			version: 7,
+			log,
+		});
+		// Pre-fix the wrapper branch fell through: every losing thread logged "reaper started"
+		// and no adopted flag existed, so eight threads read in the log as eight reapers.
+		assert.equal(state.adopted, true);
+		assert.equal(state.started, true);
+		assert.equal(child.unrefed, true, 'the wrapper interval pins the event loop until unref');
+		assert.ok(
+			log.lines.info.some((line) => /joined it/.test(line)),
+			'adoption must log as a join'
+		);
+		assert.ok(!log.lines.info.some((line) => /reaper started/.test(line)), 'a join was logged as a start');
+	}));
+
+test('a reaper that dies non-zero warns; a clean exit or a signal stays silent', () =>
+	withTempDir('orch-reaper-death-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const child = wonChild(556);
+		const log = recordingLog();
+		launchReaper(() => child, {
+			reaperScript: script,
+			rootPath: dir,
+			processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+			version: 7,
+			log,
+			outliveHint: 'The receiver port stays bound.',
+		});
+		child.emit('exit', 0, null);
+		child.emit('exit', null, 'SIGTERM');
+		assert.equal(log.lines.warn.length, 0, 'a clean exit or a stop must not warn');
+
+		// Pre-fix no exit listener existed: a crashed reaper left no line anywhere, and the
+		// next harper stop silently leaked every watched process.
+		child.emit('exit', 1, null);
+		assert.equal(log.lines.warn.length, 1);
+		assert.match(log.lines.warn[0], /outlive this node/);
+		assert.ok(log.lines.warn[0].includes('The receiver port stays bound.'), 'the caller hint was dropped');
+	}));
+
+test('caller hints reach the messages the genericization stripped', () =>
+	withTempDir('orch-hints-', (dir) => {
+		// The generic not-active report says "fail to bind their ports"; the hint is where the
+		// caller restores the concrete consequence the original named.
+		const probeLog = recordingLog();
+		const probe = wonChild();
+		assertConstrainedSpawn(() => probe, probeLog, 'All but one trace-agent will fail to bind 127.0.0.1:8126.');
+		assert.ok(probeLog.lines.error[0].includes('fail to bind 127.0.0.1:8126'));
+
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const processes = [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }];
+
+		const startedLog = recordingLog();
+		launchReaper(() => wonChild(557), {
+			reaperScript: script,
+			rootPath: dir,
+			processes,
+			version: 7,
+			log: startedLog,
+			startedHint: 'It stops the trace-agent and the core agent.',
+		});
+		assert.ok(startedLog.lines.info.some((line) => line.includes('It stops the trace-agent and the core agent.')));
+
+		const missingLog = recordingLog();
+		launchReaper(() => wonChild(558), {
+			reaperScript: path.join(dir, 'absent.js'),
+			rootPath: dir,
+			processes,
+			version: 7,
+			log: missingLog,
+			outliveHint: '127.0.0.1:8126 stays bound.',
+		});
+		assert.ok(missingLog.lines.error[0].includes('127.0.0.1:8126 stays bound.'), 'the hint missed the report');
+	}));

@@ -58,6 +58,7 @@ export {
 	type GuardLog,
 	type ManagedProcess,
 	type ProcessState,
+	type ReaperState,
 	type SpawnedChild,
 } from './spawn.js';
 // The reaper is SPAWNED, not called: a component runs dist/reaper.js as its
