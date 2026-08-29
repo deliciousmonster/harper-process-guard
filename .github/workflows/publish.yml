@@ -5,6 +5,17 @@ on:
   push:
     tags: ['v*']
 
+# The default for every job, including the reusable test call, which otherwise runs on the repo default
+# token grant; the publish job re-elevates id-token in its own block where provenance needs it.
+permissions:
+  contents: read
+
+# Deleting and re-pushing a tag while a run is still live must queue behind it, not interleave around
+# the npm publish step.
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   # The same workflow that gates every branch push, called whole, so a tag cannot publish on weaker checks than a PR merges on.
   test:

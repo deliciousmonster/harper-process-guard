@@ -19,7 +19,11 @@ test('the extractor finds every named step the workflow declares in the test job
 	// Counted from the file directly, so a regex that stopped matching cannot agree with itself.
 	const jobStart = workflowText.indexOf('\n  test:\n');
 	assert.ok(jobStart >= 0, 'test.yml no longer has the job shape this reads');
-	const declared = workflowText.slice(jobStart).match(/^\s*- name: .+$/gm) ?? [];
+	// Bounded at the next job header with the extractor's own terminator, so a sibling job's steps never inflate the count.
+	const afterHeader = jobStart + '\n  test:\n'.length;
+	const nextJob = workflowText.slice(afterHeader).search(/^\s{2}\S+:\s*$/m);
+	const jobText = workflowText.slice(jobStart, nextJob === -1 ? workflowText.length : afterHeader + nextJob);
+	const declared = jobText.match(/^\s*- name: .+$/gm) ?? [];
 	assert.equal(testJobSteps().length, declared.length);
 });
 

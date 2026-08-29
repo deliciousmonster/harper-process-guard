@@ -9,6 +9,17 @@ on:
   # publish.yml runs this workflow whole as its gate, so the publish path cannot drift onto weaker checks.
   workflow_call:
 
+# Nothing here writes with GITHUB_TOKEN; without this line every job takes the repo default, which can be write-all.
+permissions:
+  contents: read
+
+# A superseded push must not run the four-leg matrix beside its replacement. Main never cancels: nothing reads
+# run conclusions per SHA today, but keeping the guard costs nothing and a future consumer would treat a
+# cancelled run as red. On the workflow_call path this block is not imported, so the publish gate is unaffected.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test:
     name: test (${{ matrix.os }}, node ${{ matrix.node }})
@@ -59,3 +70,25 @@ jobs:
             echo "::error::No *.test.js files under test/; npm test ran nothing."
             exit 1
           fi
+
+  # Nothing else catches an expression typo or a shellcheck-visible bug before a run fails at trigger
+  # time; publish.yml's failure would surface mid-release. A digest-pinned docker ref rather than npx,
+  # so the npm dependency tree stays frozen.
+  actionlint:
+    name: lint workflow files
+    runs-on: ubuntu-latest
+    # One container pull plus a lint of two files; minutes only so a stuck pull fails fast.
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Lint the workflow files
+        uses: docker://rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+        env:
+          # SC2016 flags single-quoted `node -e` scripts whose ${} is a JS template literal, which is
+          # exactly publish.yml's tag guard; the quoting is the point, and actionlint ignores in-script
+          # directives, so exclude here.
+          SHELLCHECK_OPTS: --exclude=SC2016
+        with:
+          args: -color
