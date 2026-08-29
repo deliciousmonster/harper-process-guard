@@ -2,6 +2,7 @@
 // @ts-check
 // Run the Test workflow's test job locally, with steps EXTRACTED from test.yml so the two cannot drift; --full adds npm ci.
 import { execFileSync } from 'node:child_process';
+import { parse } from 'yaml';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,41 +17,20 @@ export const NOT_LOCAL = new Map([
 	['Install dependencies', 'pass --full to run npm ci'],
 ]);
 
-// Every step of the `test` job, in order, as `{ name, run }`; stops before the next job so a later job's steps never run here.
+// Every step of the `test` job, in order, as `{ name, run }`; a real YAML parse, so legal
+// reformatting of test.yml (indent width, comments between steps) cannot break extraction.
 export function testJobSteps() {
-	const lines = readFileSync(WORKFLOW, 'utf-8').split('\n');
-	const start = lines.findIndex((line) => /^\s{2}test:\s*$/.test(line));
-	if (start === -1) throw new Error('test.yml: no `test:` job');
-	const end = lines.findIndex((line, index) => index > start && /^\s{2}\S+:\s*$/.test(line));
-	const body = lines.slice(start, end === -1 ? lines.length : end);
+	/** @type {{ jobs?: Record<string, { steps?: { name?: unknown; run?: unknown }[] }> }} */
+	const workflow = parse(readFileSync(WORKFLOW, 'utf-8'));
+	const declared = workflow?.jobs?.test;
+	if (!declared) throw new Error('test.yml: no `test:` job');
 
-	/** @type {{ name: string, run: string | null }[]} */
-	const steps = [];
-	for (let i = 0; i < body.length; i++) {
-		const named = body[i].match(/^\s*- name: (.+?)\s*$/);
-		if (!named) continue;
-		const name = named[1];
-		let run = null;
-		for (let j = i + 1; j < body.length && !/^\s*- name: /.test(body[j]); j++) {
-			const inline = body[j].match(/^\s+run: (?!\|)(.+?)\s*$/);
-			if (inline) {
-				run = inline[1];
-				break;
-			}
-			if (/^\s+run: \|\s*$/.test(body[j])) {
-				// `?? ''` covers a `run: |` block that ends the file, which would otherwise crash here.
-				const indent = (body[j + 1] ?? '').match(/^(\s*)/)?.[1]?.length ?? 0;
-				const block = [];
-				for (let k = j + 1; k < body.length; k++) {
-					if (body[k].trim() !== '' && (body[k].match(/^(\s*)/)?.[1]?.length ?? 0) < indent) break;
-					block.push(body[k].slice(indent));
-				}
-				run = block.join('\n').trimEnd();
-				break;
-			}
-		}
-		steps.push({ name, run });
-	}
+	const steps = (declared.steps ?? [])
+		.filter((step) => typeof step.name === 'string')
+		.map((step) => ({
+			name: /** @type {string} */ (step.name),
+			run: typeof step.run === 'string' ? step.run.trimEnd() : null,
+		}));
 
 	// A workflow rename must not leave this runner reporting success having checked nothing.
 	if (!steps.some((step) => step.run)) throw new Error('test.yml: extracted no runnable steps from the test job');
