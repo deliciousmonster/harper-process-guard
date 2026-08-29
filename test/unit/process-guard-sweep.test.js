@@ -1,16 +1,5 @@
-/**
- * The stale-lock sweep.
- *
- * The property that matters most is negative: nothing may be signalled that has not been
- * positively identified. Getting that wrong reproduces the upstream defect with a SIGTERM
- * attached, which is worse than the silent adoption it replaces. So the safety cases spawn
- * real processes that are deliberately not ours, point a lock at them, and assert they live.
- *
- * The second property is that every destructive step revalidates. Between reading a lock and
- * acting on it the recorded process can exit and its pid be reused, or a sibling can write a
- * new lock. `removeIfStill` is exported so that guard can be tested directly rather than by
- * trying to time an interleaving.
- */
+// The property is negative: nothing may be signalled without positive identification, so the
+// safety cases spawn real processes that are NOT ours and assert they live.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -193,11 +182,8 @@ test('every action renders a line naming the pid, and the safe ones say what was
 	assert.match(lines[4], /signalled nothing/, 'so must the unidentifiable case');
 });
 
-/**
- * Four ways a sweep comes to read "orphan" wrongly, grouped because they share a cause:
- * liveness and identity alone cannot distinguish a process this node is about to inherit
- * from one nobody owns.
- */
+// Four misreadings of "orphan" with one cause: liveness and identity alone cannot tell a
+// process this node inherits from one nobody owns.
 
 test('REGRESSION: a live agent whose lock still carries this configuration is kept, not killed', async () => {
 	const dir = makeTempDir('sweep-adopt-');
@@ -205,9 +191,8 @@ test('REGRESSION: a live agent whose lock still carries this configuration is ke
 	try {
 		await settle(running.pid);
 		const pidDir = path.join(dir, 'pids');
-		// `harper restart` leaves the old node's children running on purpose so the replacement
-		// adopts them, and Harper adopts on a version MATCH. Stopping this process would drop
-		// whatever it was carrying, on every restart.
+		// `harper restart` leaves children for the replacement to adopt on a version MATCH;
+		// stopping this one drops its cargo on every restart.
 		writeLock(pidDir, 'agent', running.pid, 4242);
 
 		const actions = await sweepStaleLocks({
@@ -256,9 +241,8 @@ test('NEGATIVE: an unresolved binary path authorises nothing', async () => {
 		await settle(foreign.pid);
 		const pidDir = path.join(dir, 'pids');
 		writeLock(pidDir, 'agent', foreign.pid);
-		// '' is what a caller passes when resolution failed. Everything would read as
-		// unidentifiable and every lock would be removed on the strength of a question that
-		// was never asked.
+		// '' is what failed resolution passes; judged against it, every lock would be removed
+		// on a question never asked.
 		const actions = await sweepStaleLocks({ pidDir, targets: [{ name: 'agent', binaryPath: '' }] });
 		assert.equal(actions[0].action, 'skipped-unresolved');
 		assert.equal(fs.existsSync(path.join(pidDir, 'agent.pid')), true, 'a lock we could not adjudicate must survive');
@@ -296,9 +280,8 @@ test('CRITICAL: stopOrphans defaults off, so an orphan is reported and never sig
 		const pidDir = path.join(dir, 'pids');
 		writeLock(pidDir, 'agent', orphan.pid, 1111);
 
-		// No stopOrphans. Every serious finding against this module lives in the kill path, so
-		// the default must not take it, and Harper's own lock replaces the process anyway on
-		// the version mismatch.
+		// The default must not take the kill path; Harper's own version-mismatch handling
+		// replaces the process regardless.
 		const actions = await sweepStaleLocks({
 			pidDir,
 			targets: [{ name: 'agent', binaryPath: process.execPath, version: 2222 }],
@@ -347,10 +330,8 @@ test(
 	'darwin identification is spoofable, which is why it may not authorise a signal',
 	{ skip: process.platform !== 'darwin' },
 	async () => {
-		// Measured rather than asserted from documentation: argv0 sets what `ps -o comm=` prints.
-		// The file has to exist, because identify() resolves the expected path and refuses when
-		// it cannot. That is the production case: the agent binary IS on disk, which is exactly
-		// the condition under which the spoof works.
+		// argv0 sets `ps -o comm=` (measured, not documented). The expected binary must exist on
+		// disk (identify() refuses otherwise), which is exactly the production condition under which the spoof works.
 		const fake = path.join(makeTempDir('spoof-'), 'datadog-trace-agent');
 		fs.copyFileSync('/bin/sleep', fake);
 		const child = spawn('/bin/sleep', ['5'], { stdio: 'ignore', argv0: fake });

@@ -1,17 +1,5 @@
-/**
- * What a pid refers to, as distinct from whether something holds it.
- *
- * `process.kill(pid, 0)` answers "is this number in use", which is the question Harper's PID
- * lock asks and the reason a stale lock adopts a stranger. It is weaker than it looks:
- * measured on Linux it returns true for a worker THREAD's tid, so on a node whose worker
- * threads occupy tids 956-963 and whose child processes get 964 and 970, a lock left by a
- * previous boot lands inside the thread range and answers yes.
- *
- * The three-way answer is the point. "Not ours" and "cannot tell" are different facts and a
- * caller must be able to act differently on them: the first permits a signal, the second
- * forbids one. Collapsing them into a boolean is how a sweep comes to SIGTERM something it
- * never identified, which is the upstream defect restated rather than fixed.
- */
+// process.kill(pid, 0) answers "is this number in use"; measured on Linux even a worker thread's tid answers yes, so liveness alone adopts strangers.
+// "Not ours" and "cannot tell" stay distinct: only the first permits a signal.
 import { execFileSync } from 'node:child_process';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
@@ -31,30 +19,18 @@ export function isAlive(pid: number): boolean {
 	}
 }
 
-/**
- * What the platform says is running behind a pid, or null when it cannot be established.
- *
- * Absolute on Linux, and on macOS whatever the process was invoked as, which may be a bare
- * name. `identify` handles that difference; this returns the platform's answer unchanged.
- *
- * Null covers a platform this cannot read, a process owned by another user, and a pid that
- * exited while being asked. Callers must not read it as "not ours".
- */
+/** Executable behind a pid: absolute on Linux, as-invoked (possibly bare) on macOS; null means "cannot tell", never "not ours". */
 export function executableOf(pid: number): string | null {
 	if (!isAlive(pid)) return null;
 	try {
 		if (process.platform === 'linux') {
-			// The kernel's own answer, unlike cmdline, which argv can rewrite. A process whose
-			// binary was replaced on disk reads as "/path (deleted)", which will not match a
-			// resolved path and correctly yields 'differs' rather than a false match.
+			// /proc/<pid>/exe is kernel-set (argv cannot rewrite it); a replaced binary reads
+			// "/path (deleted)", which fails the match as 'differs'.
 			return realpathSync(readlinkSync(`/proc/${pid}/exe`));
 		}
 		if (process.platform === 'darwin') {
-			// macOS `comm` reports the path as invoked, so it is absolute for a process started
-			// from an absolute path and a bare name for one found on PATH: measured, a
-			// PATH-spawned `sleep` reports "sleep". Returned raw, and resolved by the caller
-			// only when it is absolute, because realpath of a bare name throws ENOENT and would
-			// turn a perfectly identifiable process into "cannot tell".
+			// `comm` is the path as invoked, so a PATH-spawned process reports a bare name. Returned
+			// raw: realpath of a bare name throws and would turn identifiable into "cannot tell".
 			const out = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], {
 				encoding: 'utf-8',
 				timeout: 2000,
@@ -77,15 +53,7 @@ export type Identification =
 	/** Not established. A caller must not signal it, and should say so. */
 	| 'unknown';
 
-/**
- * Whether `pid` is running `binaryPath`, with "cannot tell" kept distinct from "no".
- *
- * The asymmetry between the two negative answers is deliberate. A full path that differs
- * proves a different process. A bare name that differs also proves it, because no path ends
- * in a different basename. But a bare name that MATCHES proves nothing: two binaries called
- * `agent` in different directories share it. So a basename match yields 'unknown', never
- * 'match', which keeps the only answer that permits a signal resting on a full path.
- */
+/** 'match' requires full-path equality. A bare-name mismatch still proves 'differs', but a bare-name match proves nothing (two binaries share a basename) and yields 'unknown'. */
 export function identify(pid: number, binaryPath: string): Identification {
 	if (!binaryPath) return 'unknown';
 	if (!isAlive(pid)) return 'differs';
@@ -112,12 +80,7 @@ export function identify(pid: number, binaryPath: string): Identification {
 	return basename(actual) === basename(expected) ? 'unknown' : 'differs';
 }
 
-/**
- * Read a Harper PID lock: pid on line 1, version fingerprint on line 2.
- *
- * Parsed with the tolerance Harper reads it with, so this never disagrees with the lock about
- * what the lock says.
- */
+/** Harper PID lock: pid on line 1, version on line 2, parsed with Harper's own tolerance so this never disagrees with what the lock says. */
 export function readLock(path: string): { pid: number; version: number } | null {
 	try {
 		const lines = readFileSync(path, 'utf-8').trim().split('\n');
@@ -129,37 +92,12 @@ export function readLock(path: string): { pid: number; version: number } | null 
 	}
 }
 
-/**
- * Whether this platform's identification is trustworthy enough to authorise a signal.
- *
- * False on darwin, and the reason is not conservatism. `ps -o comm=` reports argv[0], which
- * the process being examined chooses: measured, `spawn('/bin/sleep', ['5'], { argv0:
- * '/path/to/datadog-trace-agent' })` makes `comm` print that path verbatim while the binary is
- * still /bin/sleep. So a `match` on darwin means "something claims to be our binary", which is
- * enough to leave a process alone and nowhere near enough to send it a signal. The Linux branch
- * reads /proc/<pid>/exe, which the kernel fills in and argv cannot touch.
- *
- * The asymmetry is the point. A wrong `match` that causes inaction is harmless; a wrong `match`
- * that causes a SIGTERM is the defect this module exists to prevent, arriving from the inside.
- */
+/** Linux only: /proc/<pid>/exe is kernel-set. macOS `comm` is argv[0], which the examined process chooses (measured: an argv0 spoof prints verbatim), so a darwin 'match' justifies inaction, never a signal. */
 export function identificationCanAuthoriseSignal(): boolean {
 	return process.platform === 'linux';
 }
 
-/**
- * The OS's own record of when a process started, as an opaque string, or null.
- *
- * Read rather than computed, which is the whole point. Deriving a start time as
- * `Date.now() - process.uptime() * 1000` mixes a wall clock with a monotonic one, so every
- * NTP step, VM resume or host time sync moves the answer; two threads of one process that
- * computed it either side of a step disagree about which process they belong to. The kernel's
- * recorded value does not move when the clock does.
- *
- * Opaque because callers only ever compare it for equality. On Linux it is field 22 of
- * /proc/<pid>/stat, starttime in clock ticks since boot, paired with the boot id so it cannot
- * collide across a reboot. On darwin it is the start time `ps` reports, which is captured at
- * exec and not recomputed.
- */
+/** Opaque, equality-only start token: Linux starttime plus boot id, darwin lstart. Read from the OS, never derived; Date.now() - uptime() mixes clocks, so a step splits threads of one process. */
 export function processStartToken(pid: number = process.pid): string | null {
 	try {
 		if (process.platform === 'linux') {
@@ -192,18 +130,7 @@ export function processStartToken(pid: number = process.pid): string | null {
 	}
 }
 
-/**
- * Process identity taken from Harper's own `hdb.pid`, for platforms with no start token.
- *
- * Harper writes that file once per start, so its mtime is the start time and every worker
- * thread reads the same bytes from the same file rather than each deriving a value. That is
- * the property the derived fallback lacks: `Date.now() - process.uptime() * 1000` mixes a wall
- * clock with a monotonic one, so a clock step moves it, and two threads either side of a step
- * disagree about which process they belong to.
- *
- * Returns null when the file is absent or does not name this process, which is the honest
- * answer rather than a guess: a caller then falls back to whatever the OS offers.
- */
+/** Identity from hdb.pid, written once per start: every thread reads the same bytes, immune to the clock steps that split the derived fallback. Null unless the file names this pid. */
 export function harperIdentity(rootPath: string): { pid: number; token: string; startedAt: number } | null {
 	try {
 		const file = join(rootPath, 'hdb.pid');

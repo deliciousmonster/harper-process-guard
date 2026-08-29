@@ -3,11 +3,8 @@
 		"target": "ES2022",
 		"module": "NodeNext",
 		"lib": ["ES2022"],
-		// Under the pinned 5.x this narrows the auto-included @types to node alone. It is
-		// also what keeps the build alive on TypeScript 7, which stops auto-including every
-		// package under node_modules/@types: without it the entire Node global surface
-		// (process, console, node:*) goes invisible there and the build dies on TS2591 at
-		// the first `process` reference.
+		// TS7 stops auto-including node_modules/@types; without "types": ["node"] every
+		// `process` reference dies on TS2591.
 		"types": ["node"],
 		"outDir": "./dist",
 		"rootDir": "./src",

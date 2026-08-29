@@ -1,14 +1,5 @@
-/**
- * Two components sharing one Harper node, and therefore one pid directory.
- *
- * Every other suite here exercises a single caller, which is the configuration that cannot
- * reveal this class of bug. The marker key is derived per caller precisely so a second
- * component does not read the first one's completed marker as its own and skip its sweep
- * entirely, and only an actual second caller exercises that derivation.
- *
- * The scenario is ordinary: a Harper node running two components that each spawn a child
- * gets exactly this layout.
- */
+// The marker key is derived per caller so a second component cannot read the first's completed
+// marker as its own and skip its sweep; only an actual second caller exercises that derivation.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -42,9 +33,8 @@ test('CRITICAL: a second component sweeps its own locks rather than inheriting a
 		writeLock(pidDir, 'datadog-trace-agent');
 		writeLock(pidDir, 'metrics-exporter');
 
-		// Sequential and in one process, which is the case a shared marker key breaks: the
-		// second call would find the first one's completed marker, read it as its own, and
-		// return swept:false having checked nothing.
+		// Sequential in one process is the case a shared key breaks: the second call would read
+		// the first's completed marker as its own and check nothing.
 		const first = await bootstrap({ pidDir, processes: DATADOG });
 		const second = await bootstrap({ pidDir, processes: EXPORTER });
 
@@ -77,9 +67,8 @@ test('the derived key does not depend on declaration order', () =>
 	withTempDir('two-order-', async (dir) => {
 		const pidDir = path.join(dir, 'pids');
 		await bootstrap({ pidDir, processes: DATADOG });
-		// Same component, same processes, declared the other way round. A key that depended on
-		// order would mint a second marker and sweep again, which is not wrong so much as a
-		// sign the key is not identifying what it claims to.
+		// An order-dependent key would mint a second marker and sweep again, a sign it does not
+		// identify what it claims to.
 		const again = await bootstrap({ pidDir, processes: [...DATADOG].reverse() });
 		assert.equal(again.swept, false, 'the same component swept twice under two keys');
 		assert.equal(fs.readdirSync(pidDir).filter((f) => f.endsWith('.once')).length, 1);

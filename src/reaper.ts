@@ -1,30 +1,5 @@
-/**
- * Stops a component's child processes when the Harper that owns them goes away.
- *
- * This is the other end of the lifetime `bootstrap()` opens. The sweep repairs what a previous
- * boot left behind; this exists so there is less to repair, by stopping the children while
- * something still knows what they are.
- *
- * It runs as its own detached OS process, and has to. Harper's own shutdown cannot do this: a
- * worker thread has no hook that fires on node shutdown, `harper stop` sends one SIGTERM to the
- * main process and sweeps nothing under `pids/`, and a SIGKILL fires no handler at all. A
- * process outside the node is the only thing that can watch it die.
- *
- * SPAWNED, NEVER IMPORTED. A component runs it as
- * `node <package>/dist/reaper.js --...`. That is why it lives in the
- * package rather than being copied into each component: a copy per component drifts, and a
- * drifted copy reaps on liveness alone. It reaches its siblings by relative path,
- * which works because it is spawned from inside dist/; a bare specifier would not resolve from
- * a detached script.
- *
- * WHAT IT WILL NOT DO. It signals only a process it has grounds to believe is the one it was
- * given. Where the platform can identify a process it requires that identification. Where it
- * cannot, it falls back to the one pid it has first-hand knowledge of, the pid it watched
- * start, and never to a pid read from a file that anything could have rewritten. The rule is
- * deliberately weaker than the sweep's, because requiring identification everywhere would make
- * this refuse to act on macOS and leak a process on every stop, which is worse than the reuse
- * it would avoid.
- */
+// A detached OS process, because nothing inside the node survives its death (no worker shutdown hook; SIGKILL fires no handler). Spawned as dist/reaper.js, never imported; siblings resolve by relative path, which only works from inside dist/.
+// Signals only an identified process, or the pid it watched start; never a pid read from a file.
 import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -51,11 +26,7 @@ export interface ReaperOptions {
 	/** The process to watch. When it goes, the targets are stopped. */
 	harperPid: number;
 	targets: ReapTarget[];
-	/**
-	 * Where a replacement writes its pid. `harper restart` forks a new main process and exits
-	 * the old one, which is a path on which the children should be KEPT for the replacement to
-	 * adopt, so this waits for one before reaping.
-	 */
+	/** Where a replacement writes its pid: `harper restart` forks a new main, so the children are KEPT for it to adopt, and reaping waits for one first. */
 	hdbPidFile?: string;
 	/** How long to wait for that replacement. */
 	restartGraceMs: number;
@@ -98,15 +69,7 @@ function removeQuietly(path: string | undefined): void {
 	}
 }
 
-/**
- * Which candidates this may signal.
- *
- * Two sources, and they are not equally trustworthy. `pid` is what this process watched start
- * and has supervised since. `recorded` is whatever the lock file says now, which anything could
- * have written; a container's pid namespace restarts at 1 and a component's children land on
- * the same small numbers every boot, so a stale file naming a reused pid is routine rather than
- * theoretical.
- */
+/** `pid` is first-hand (watched start); `recorded` is whatever the file says now. Container pid namespaces restart at 1, so a stale file naming a reused pid is routine. */
 function targetsFor(options: ReaperOptions, target: ReapTarget, recorded: number | null): number[] {
 	const candidates = [...new Set([recorded, target.pid])].filter(
 		(candidate): candidate is number => candidate !== null && isAlive(candidate)
@@ -126,13 +89,7 @@ function targetsFor(options: ReaperOptions, target: ReapTarget, recorded: number
 	});
 }
 
-/**
- * Stop one child.
- *
- * The lock is removed first, on purpose: a file naming a process that is being killed is worse
- * than no file, because a worker that reads it adopts a corpse and never retries, while a
- * worker that finds nothing spawns a replacement.
- */
+/** The lock is removed BEFORE signalling: a worker that reads a dying pid adopts a corpse and never retries; one that finds nothing spawns a replacement. */
 export async function reapTarget(options: ReaperOptions, target: ReapTarget): Promise<void> {
 	const recorded = readPidFile(target.pidFile);
 	removeQuietly(target.pidFile);
@@ -155,9 +112,7 @@ export async function reapTarget(options: ReaperOptions, target: ReapTarget): Pr
 	const deadline = Date.now() + TERM_GRACE_MS;
 	while (Date.now() < deadline && targets.some(isAlive)) await delay(100);
 
-	// Escalation is confined to processes that were identified above, which is what makes it
-	// defensible: SIGKILL on a pid this could not name would be the defect the whole module
-	// exists to prevent, with the loudest possible signal attached.
+	// SIGKILL only reaches pids identified above; killing an unnamed pid would be the module's own defect.
 	for (const pid of targets.filter(isAlive)) {
 		try {
 			process.kill(pid, 'SIGKILL');
@@ -176,12 +131,7 @@ function replacementPid(options: ReaperOptions): number | null {
 	return pid;
 }
 
-/**
- * Watch, then either hand over or reap.
- *
- * Exported so the behaviour can be tested without spawning a process; the module tail runs it
- * when this file is executed directly.
- */
+/** Exported so a test can drive it without spawning a process; the module tail runs it when executed directly. */
 export async function run(options: ReaperOptions): Promise<void> {
 	log(
 		options,
@@ -210,12 +160,7 @@ export async function run(options: ReaperOptions): Promise<void> {
 	log(options, 'done.');
 }
 
-/**
- * `--target <base64 json>`, repeatable: `{ pidFile, pid, binaryPath }`.
- *
- * Base64 because every field is an absolute path and the previous `pidFile:pid` spelling split
- * on the last colon, which a path containing one breaks.
- */
+/** `--target <base64 json>` ({pidFile, pid, binaryPath}), repeatable. Base64 because the fields are absolute paths and the old colon-split spelling broke on a path containing one. */
 export function parseArgs(argv: string[]): ReaperOptions {
 	const options: ReaperOptions = { harperPid: Number.NaN, targets: [], restartGraceMs: 8000 };
 	for (let i = 0; i < argv.length; i++) {
@@ -247,9 +192,8 @@ export function parseArgs(argv: string[]): ReaperOptions {
 			case '--target':
 				try {
 					const decoded: unknown = JSON.parse(Buffer.from(value, 'base64').toString('utf-8'));
-					// Validated field by field for the same reason it is dropped on a parse
-					// failure below: a descriptor that cannot be read names nothing this may
-					// act on, so a wrong shape is dropped rather than guessed at.
+					// A descriptor that cannot be read names nothing this may act on, so a wrong
+					// shape is dropped rather than guessed at, same as the parse failure below.
 					if (
 						typeof decoded === 'object' &&
 						decoded !== null &&
@@ -284,9 +228,8 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		process.stderr.write('reaper: --harper-pid must be a positive integer\n');
 		process.exit(2);
 	}
-	// Not awaited at top level. A top-level await makes the whole ESM graph async, and
-	// index.ts re-exports this file, so require() of the package entry point would throw
-	// ERR_REQUIRE_ASYNC_MODULE. test/unit/require-entry.test.js pins that and caught it.
+	// Not awaited: a top-level await makes the whole ESM graph async, and require() of the
+	// package entry (which re-exports this file) would throw ERR_REQUIRE_ASYNC_MODULE.
 	run(options).catch((error: unknown) => {
 		process.stderr.write(`reaper: ${errorMessage(error)}\n`);
 		process.exit(1);

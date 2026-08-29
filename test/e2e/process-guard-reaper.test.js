@@ -1,16 +1,5 @@
-/**
- * The reaper the guard owns, against real processes.
- *
- * It closes the lifetime `bootstrap()` opens, and it is the most dangerous thing in the module:
- * it is the only part that escalates to SIGKILL. So the tests that matter are the ones proving
- * what it will NOT signal.
- *
- * Its rule is deliberately weaker than the sweep's, and that is the point of the fallback test
- * below. Requiring positive identification everywhere would make it refuse to act on macOS and
- * leak a process on every stop, which is worse than the reuse it would avoid. So where the
- * platform cannot identify a process it falls back to the one pid it has first-hand knowledge
- * of, the pid it watched start, and never to a pid read from a file.
- */
+// The only code that escalates to SIGKILL, so the tests that matter prove what it will NOT signal.
+// Its rule is weaker than the sweep's on purpose: with no identification it falls back to the pid it watched start, never one read from a file, or macOS would leak a process on every stop.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -225,10 +214,8 @@ test('a descriptor that cannot be read is dropped rather than guessed at', () =>
 	assert.deepEqual(parsed.targets, [], 'a target it cannot read names nothing it may act on');
 });
 
-/**
- * The liveness misreadings a reaper must not make: firing while the node is alive, accepting
- * a dead pid as a replacement, and reading a containerised Harper as already gone.
- */
+// Liveness misreadings the reaper must not make: firing while the node lives, accepting a dead
+// pid as a replacement, reading a containerised Harper as gone.
 
 test('NEGATIVE: nothing is stopped while the watched process is still alive', async () => {
 	const dir = makeTempDir('reap-alive-');

@@ -1,12 +1,5 @@
-/**
- * The bootstrap entry point, which is the two primitives composed.
- *
- * The composition is where a caller's guarantee is either delivered or quietly lost, so these
- * tests are about what `bootstrap()` PROMISES rather than about the sweep or the barrier,
- * which have their own suites. Chiefly: a thread that did not establish the precondition must
- * say so, because a caller that cannot distinguish "checked, nothing wrong" from "not checked"
- * is back to the silence this whole module exists to remove.
- */
+// What bootstrap() PROMISES, not the primitives: a thread that did not establish the
+// precondition must say so, or "checked, clean" and "not checked" collapse into the same silence.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -50,10 +43,8 @@ test('CRITICAL: a thread that could not establish the precondition says so', () 
 	withTempDir('boot-timeout-', async (dir) => {
 		const pidDir = path.join(dir, 'pids');
 		fs.mkdirSync(pidDir, { recursive: true });
-		// A claim from this process that never completes, which is what a winner killed
-		// mid-sweep leaves behind. Every later thread waits, then has to report.
-		// The marker filename is namespaced per caller now, so the fixture has to name the same
-		// key the call will derive. Passing `namespace` explicitly keeps the two in step.
+		// A never-completed claim from this process, as a winner killed mid-sweep leaves. The marker
+		// key is namespaced per caller; passing `namespace` keeps the fixture and the call deriving the same filename.
 		fs.writeFileSync(
 			path.join(pidDir, '.harper-process-guard.probe.once'),
 			JSON.stringify({ ...currentProcess(), done: false, thread: 99 })
@@ -105,9 +96,8 @@ test('eight threads: one sweeps, the rest wait and report nothing of their own',
 
 test('the default timeout scales with how many processes might need stopping', () =>
 	withTempDir('boot-budget-', async (dir) => {
-		// Not asserted through the clock, which would be slow and flaky. The property is that
-		// a caller with more processes gets more room, because each orphan is stopped in turn
-		// and a fixed budget would time out on a list long enough.
+		// Asserted structurally, not through the clock: more processes must buy a bigger budget,
+		// since orphans are stopped in turn.
 		const pidDir = path.join(dir, 'pids');
 		const many = Array.from({ length: 6 }, (_, i) => ({ name: `p${i}`, binaryPath: '/nonexistent' }));
 		const result = await bootstrap({ pidDir, processes: many });

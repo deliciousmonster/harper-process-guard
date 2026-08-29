@@ -1,8 +1,6 @@
 {
-	// Type-checks the hand-written JS beside src/: the local CI runner and the shared test
-	// harness, whose JSDoc types propagate to every suite. Standalone rather than extending
-	// tsconfig.json: JSDoc carries plain strict well, while noUncheckedIndexedAccess would
-	// bury the runner's line parser under `?? ''` at every subscript it takes.
+	// Type-checks the hand-written JS beside src/. Standalone rather than extending tsconfig.json:
+	// noUncheckedIndexedAccess would bury the runner's line parser under `?? ''` at every subscript.
 	"compilerOptions": {
 		"target": "ES2022",
 		"module": "NodeNext",

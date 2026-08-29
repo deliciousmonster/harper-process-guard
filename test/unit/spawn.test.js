@@ -1,12 +1,5 @@
-/**
- * The spawn orchestrator, against a stub of Harper's constrained spawn.
- *
- * A stub is the honest fixture here, not a shortcut: the orchestrator's contract is entirely
- * "what it does with whatever spawn the caller hands it", and Harper's spawn has exactly three
- * behaviours - throw synchronously, return a real ChildProcess, or return an adoption wrapper
- * distinguishable only by the absence of spawnargs. All three are cheap to fake and impossible
- * to produce on demand from a real Harper.
- */
+// Harper's spawn has exactly three behaviours (throw synchronously, return a real ChildProcess, or return an
+// adoption wrapper distinguishable only by missing spawnargs): all cheap to stub, impossible to produce on demand from a real Harper.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
@@ -236,9 +229,8 @@ test('a respawn clears exited and error left by the dead incarnation', async () 
 
 	await new Promise((r) => setTimeout(r, 1200));
 	assert.equal(spawns.length, 2, 'exit code 1 must produce one respawn');
-	// The reused state has to describe the process actually running. Pre-fix, exited stayed
-	// true and error stayed set beside the replacement pid, so one early death read as a dead
-	// process for the rest of the node's life and latched any caller probe that gave up on it.
+	// Pre-fix, exited and error survived the respawn beside the new pid, so one early death
+	// read as dead for the rest of the node's life.
 	assert.equal(state.pid, spawns[1].pid);
 	assert.ok(!state.exited, 'exited survived the respawn');
 	assert.ok(!state.error, 'error survived the respawn');

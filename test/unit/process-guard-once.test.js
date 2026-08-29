@@ -1,16 +1,5 @@
-/**
- * The once-per-process barrier, tested against real worker threads.
- *
- * Harper's concurrency is eight threads inside one OS process, so a test that calls the
- * barrier eight times in a loop proves nothing about the case it exists for: the calls would
- * be sequential and every interesting interleaving impossible. These tests start actual
- * `node:worker_threads` in this process, which reproduces the exact shape, including that all
- * of them share `process.pid` and `process.uptime()`.
- *
- * The property under test is not "one thread ran it". It is "no thread returned before the
- * work finished": a barrier that releases the losers early protects only the winner, and the
- * other seven race ahead into the state the work is still repairing.
- */
+// Real worker threads: eight sequential loop calls cannot produce the interleavings the barrier
+// exists for. The property is that NO thread returns before the work finishes; releasing losers early protects only the winner.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -23,12 +12,8 @@ import { REPO_ROOT, importDist, makeTempDir, withTempDir } from '../support/harn
 const { oncePerProcess, currentProcess } = await importDist('once.js');
 const ONCE_URL = pathToFileURL(path.join(REPO_ROOT, 'dist', 'once.js')).href;
 
-/**
- * Run the barrier in `count` real worker threads at once.
- *
- * Each worker reports when it entered, whether it ran the work, when the work finished, and
- * when its own call returned. The ordering between those is the assertion.
- */
+/** The barrier across `count` real worker threads; each reports whether it ran and when it
+ * returned, and the ordering against the work's finish time is the assertion. */
 function race(dir, { count = 8, workMs = 300, key = 'sweep' } = {}) {
 	const script = `
 		import { parentPort, workerData } from 'node:worker_threads';
@@ -100,12 +85,8 @@ test('a second call in the same process does not re-run the work', () =>
 
 test('CRITICAL: a marker left by a previous boot with THIS pid is not mistaken for ours', () =>
 	withTempDir('once-pidreuse-', async (dir) => {
-		// The case that defeats a pid-named marker. A container restart hands the entrypoint
-		// the same small pid, and the marker is on a persistent volume, so pid alone cannot
-		// tell a previous boot from this one. Same pid, start time an hour ago.
-		// A previous boot is now faked by changing the OS start TOKEN, not the derived
-		// startedAt: identity prefers the token precisely so a clock cannot move it, which
-		// means a fixture that only moves the clock no longer describes a different process.
+		// Same pid, different boot: the marker outlives the container and the entrypoint pid recurs.
+		// The previous boot is faked via the OS start TOKEN; identity prefers it, so a moved clock alone no longer describes a different process.
 		const stale = { ...currentProcess(), token: 'previous-boot-token', done: false, thread: 1 };
 		fs.writeFileSync(path.join(dir, '.k.once'), JSON.stringify(stale));
 

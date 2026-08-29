@@ -1,30 +1,5 @@
-/**
- * Clear the PID locks a previous Harper left behind, before this one spawns anything.
- *
- * Harper's `acquirePidFileLock` treats a lock as valid when `process.kill(pid, 0)` says some
- * process holds the recorded number. Nothing checks that the process is the one the lock
- * names, so a lock that outlived its writer is adopted by whoever inherits its pid and the
- * process it names is never started. Observed shape: two lock files both recording pid 964,
- * one child process answering to both names, the other never started, and the component
- * reporting success.
- *
- * Two rules govern everything here.
- *
- * Nothing is signalled without a positive identification. "Cannot tell" and "not ours" are
- * different answers and only one of them permits a signal. A sweep that guesses is the defect
- * it was written to remove, with a SIGTERM attached.
- *
- * Every destructive step revalidates immediately before acting. The lock is read, a decision
- * is made, and between those two the world can change: the recorded process can exit and its
- * pid be reused, or a sibling can write a new lock. Re-reading and requiring the same pid
- * turns a wide window into a narrow one and makes the failure "skipped" rather than "killed
- * the wrong thing".
- *
- * This must run inside oncePerProcess(), which is what guarantees no thread of this process
- * reaches spawn() while it is running. Without that, a sweep can meet a healthy process a
- * sibling started moments earlier and cannot tell it from an orphan, because it genuinely is
- * our binary and this process genuinely did not record starting it.
- */
+// Harper validates a lock by liveness alone, so a stale lock adopts whoever inherits its pid. Two rules: nothing signalled without positive identification, and every destructive step re-reads the lock first.
+// Must run inside oncePerProcess(): otherwise a sibling's fresh healthy process is indistinguishable from an orphan.
 import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -41,16 +16,7 @@ export interface SweepTarget {
 	readonly name: string;
 	/** Absolute path of the binary, used to identify an orphan. Resolve it before calling. */
 	readonly binaryPath: string;
-	/**
-	 * The `version` this caller is about to pass to Harper's spawn, when it passes one.
-	 *
-	 * This is what separates an orphan from a handover, and without it the sweep gets that
-	 * backwards. `harper restart` deliberately leaves the old node's children running so the
-	 * replacement adopts them, and Harper adopts on a version MATCH. So a live process running
-	 * our binary under a lock whose version still matches is not an orphan at all; it is the
-	 * process this node is about to inherit, and stopping it drops whatever it was carrying.
-	 * Only a mismatch means the lock describes a configuration that no longer exists.
-	 */
+	/** The version this caller will pass to spawn. A live process under a MATCHING lock is a handover `harper restart` depends on, not an orphan; only a mismatch marks a dead configuration. */
 	readonly version?: number | undefined;
 }
 
@@ -68,13 +34,7 @@ export type SweepAction =
 	| { readonly name: string; readonly pid: number; readonly action: 'removed-unidentifiable' }
 	| { readonly name: string; readonly pid: number; readonly action: 'skipped-changed' };
 
-/**
- * Remove stale locks for `targets`, stopping any orphan positively identified as ours.
- *
- * Returns what it did, so the caller logs it into its own sink at its own level. Nothing here
- * logs: a component's warnings have to reach hdb.log, and a package that writes to its own
- * console reaches nobody.
- */
+/** Returns actions instead of logging: a component's warnings must reach hdb.log, and a package writing to its own console reaches nobody. */
 export async function sweepStaleLocks({
 	pidDir,
 	targets,
@@ -92,9 +52,8 @@ export async function sweepStaleLocks({
 	for (const target of targets) {
 		const lockPath = join(pidDir, `${target.name}.pid`);
 
-		// An empty path is what a caller passes when resolution failed. Nothing can be
-		// identified against it, so every live process would read as unidentifiable and every
-		// lock would be removed on the strength of a question never asked.
+		// An empty path means resolution failed: judged against it, every live process reads
+		// unidentifiable and every lock is removed on a question never asked.
 		if (!target.binaryPath) {
 			const unresolved = readLock(lockPath);
 			if (unresolved) actions.push({ ...entry(target, unresolved.pid), action: 'skipped-unresolved' });
@@ -126,20 +85,16 @@ export async function sweepStaleLocks({
 		}
 
 		if (identification === 'unknown') {
-			// A platform that cannot see, or a process owned by someone else. Removing the
-			// lock lets a replacement start; if the unseen process really was our orphan it
-			// still holds the port, and the caller's own liveness check reports that. Better
-			// than signalling blind, and better than leaving a lock that will be adopted.
+			// Unidentifiable: remove the lock (left, it would be adopted) but signal nothing; a
+			// real orphan still holds its port, which the caller's liveness check reports.
 			if (removeIfStill(lockPath, lock.pid))
 				actions.push({ ...entry(target, lock.pid), action: 'removed-unidentifiable' });
 			else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
 			continue;
 		}
 
-		// Positively our binary. Whether that makes it an orphan depends on the fingerprint:
-		// Harper adopts a lock whose version matches, so a match means this node is about to
-		// inherit a healthy process and must leave it exactly where it is. `harper restart`
-		// depends on that, and a sweep that stopped it would drop spans on every restart.
+		// A version match is the process this node inherits (`harper restart` depends on it);
+		// leave it exactly where it is.
 		if (target.version !== undefined && lock.version === target.version) {
 			actions.push({ ...entry(target, lock.pid), action: 'kept-for-adoption' });
 			continue;
@@ -148,9 +103,8 @@ export async function sweepStaleLocks({
 		// The fingerprint moved, so the lock describes a configuration that no longer exists:
 		// an orphan. Whether it may be signalled is the caller's decision and the platform's.
 		if (!stopOrphans || !identificationCanAuthoriseSignal()) {
-			// Left running and left locked, on purpose. Harper's own lock kills a process whose
-			// recorded version no longer matches, so the runtime resolves this either way; the
-			// difference is that it does so without checking what it is signalling.
+			// Left running AND locked: Harper's own version-mismatch handling replaces it either
+			// way, just without checking what it signals.
 			actions.push({ ...entry(target, lock.pid), action: 'reported-orphan' });
 			continue;
 		}
@@ -172,9 +126,8 @@ export async function sweepStaleLocks({
 		const deadline = Date.now() + stopTimeoutMs;
 		while (Date.now() < deadline && isAlive(lock.pid)) await delay(STOP_POLL_MS);
 
-		// Deliberately no escalation to SIGKILL. A process that ignores SIGTERM is a condition
-		// to report, not to force: this cannot know what it is in the middle of, and the pid
-		// may by now belong to something else entirely.
+		// No SIGKILL: a SIGTERM-ignoring process is reported, not forced; by now the pid may
+		// belong to something else.
 		const survived = isAlive(lock.pid);
 		removeIfStill(lockPath, lock.pid);
 		actions.push({ ...entry(target, lock.pid), action: survived ? 'orphan-survived' : 'stopped-orphan' });
@@ -187,15 +140,7 @@ function entry(target: SweepTarget, pid: number): { name: string; pid: number } 
 	return { name: target.name, pid };
 }
 
-/**
- * Remove the lock only if it still names `pid`, so a lock rewritten in the meantime survives.
- *
- * Returns false when it had changed, which the caller reports rather than retrying: the
- * change means something else is managing this name and a second opinion would be a race.
- *
- * Exported for the hermetic suite: this guard is the difference between a narrow race and a
- * wide one, and it is not otherwise reachable from a test without timing the interleaving.
- */
+/** Unlink only while the lock still names `pid`; false means it changed hands: report, don't retry. Exported so this guard is testable without timing an interleaving. */
 export function removeIfStill(lockPath: string, pid: number | null): boolean {
 	if (pid !== null) {
 		const current = readLock(lockPath);
@@ -205,9 +150,7 @@ export function removeIfStill(lockPath: string, pid: number | null): boolean {
 		unlinkSync(lockPath);
 		return true;
 	} catch (error) {
-		// ENOENT is the outcome asked for. Anything else means the file is still there, and
-		// reporting a removal that did not happen is worse than reporting nothing: the caller
-		// logs a repair, and the lock is adopted on the next start regardless.
+		// ENOENT is success; anything else must not report a removal that never happened.
 		return errnoCode(error) === 'ENOENT';
 	}
 }

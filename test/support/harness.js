@@ -10,18 +10,16 @@ import { pathToFileURL } from 'node:url';
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 
 /**
- * The repo manifest. Suites derive the package name and version from it rather
- * than hardcoding either: a test pinning the old scope would keep passing
- * against a stale assumption after a re-scope.
+ * The repo manifest; suites derive name and version from it so a re-scope
+ * cannot leave tests passing against a stale scope.
  *
  * @type {{ name: string, version: string }}
  */
 export const PACKAGE_MANIFEST = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
 
 /**
- * Import a compiled module from a built dist/ - this repo's, or a sandbox copy
- * when `root` is given. pathToFileURL because import() of a bare absolute path
- * is rejected on Windows.
+ * Import from a built dist/ (this repo's, or a sandbox via `root`).
+ * pathToFileURL: import() of a bare absolute path is rejected on Windows.
  *
  * @param {string} file
  * @param {string} [root]
@@ -31,10 +29,8 @@ export function importDist(file, root = REPO_ROOT) {
 }
 
 /**
- * A temp directory whose path is already resolved: on macOS os.tmpdir() lives
- * under a /var -> /private/var symlink, while everything a suite compares it
- * against (ps(1) output, the __dirname a module loaded from inside it reports)
- * is the resolved spelling.
+ * mkdtemp with the path pre-resolved: macOS tmpdir sits behind /var -> /private/var,
+ * and suites compare it to resolved spellings (ps output, a loaded module's __dirname).
  *
  * @param {string} prefix
  */
@@ -43,10 +39,8 @@ export function makeTempDir(prefix) {
 }
 
 /**
- * makeTempDir() around `run`, removed however `run` ends. The result is
- * awaited, so a test must RETURN this call rather than fire and forget it: a
- * synchronous callback that threw would otherwise reject a promise nobody
- * holds, and the test would pass.
+ * A temp dir around `run`, removed however it ends. Tests must RETURN this
+ * call: a fire-and-forget rejection is held by nobody and the test passes.
  *
  * @template T
  * @param {string} prefix
@@ -63,15 +57,8 @@ export async function withTempDir(prefix, run) {
 }
 
 /**
- * A throwaway copy of the built package: dist/, whatever else `include` names,
- * the manifest, and a node_modules of symlinks into this repo's own.
- *
- * The manifest is copied because it carries "type": "module", which is what
- * makes the copied dist/*.js load as ESM; without it Node falls back to
- * per-file syntax detection. `shadowed` names top-level node_modules entries to
- * leave unlinked, which is how a caller substitutes a stub of its own:
- * symlinking the package scope would let a real installed platform package win,
- * and the stub would never be exercised.
+ * A throwaway copy of the built package with symlinked node_modules. The copied manifest carries
+ * "type": "module" (else per-file syntax detection); `shadowed` leaves entries unlinked so a caller's stub wins over a real package.
  *
  * @param {{ prefix: string, include?: string[], shadowed?: string[] }} options
  */
@@ -98,9 +85,8 @@ export function createDistSandbox({ prefix, include = [], shadowed = [] }) {
 }
 
 /**
- * Run with process.env[name] set to `value`, or removed when `value` is
- * undefined, restoring the previous state however `run` ends. Unset and empty
- * are kept distinct: the launcher's fallbacks read the difference.
+ * process.env[name] set (or removed when undefined) around `run`, restored
+ * after. Unset and empty stay distinct: the launcher's fallbacks read the difference.
  *
  * @template T
  * @param {string} name
@@ -132,9 +118,8 @@ export function withHome(home, run) {
 }
 
 /**
- * `run` with console.warn captured, which is where this package's logger writes.
- * Async so one copy serves both the launcher's awaited probes and the preflight
- * checks that run synchronously; those callers have to await it anyway.
+ * `run` with console.warn captured, where this package's logger writes. Async
+ * so one helper serves both sync and awaited callers.
  *
  * @param {() => unknown} run
  * @returns {Promise<string[]>}
@@ -204,12 +189,8 @@ export function withReceiver(options, run) {
  */
 
 /**
- * An unstarted HTTP server answering `answers` and 404ing every other path. The
- * 404 is the point: the probe URL is part of what these suites assert, and a
- * stub that answered everything would let a probe-path typo pass.
- *
- * Unstarted because where and when it listens differs per caller; one of them
- * defers the listen to prove the launcher's poller keeps polling.
+ * An unstarted HTTP server answering only `answers`, 404ing the rest: a stub that answered
+ * everything would let a probe-path typo pass. Unstarted because one caller defers the listen to prove the poller keeps polling.
  *
  * @param {ReceiverStubOptions} [options]
  */
