@@ -57,3 +57,12 @@ several cases assert different outcomes per platform. That divergence is the des
 Not yet. `package.json` carries `"private": true` and the name
 `@deliciousmonster/harper-process-guard`, which was free on the registry when checked
 (2026-08-28). README.md ends with what has to be true before the private flag comes off.
+
+The path exists ahead of the decision. `publish.yml` fires only on a hand-pushed `v*` tag, runs
+the full test matrix first, and then refuses in two cases: while the private flag stands, and
+when the tag disagrees with the manifest version. The first guard is the point, because the flag
+is load-bearing and a tag pushed out of habit must bounce off it rather than ship.
+
+`npm run ci:local` executes the test job's own steps, extracted from `test.yml` at run time, so
+the local gate and CI cannot drift apart; `test/unit/ci-local.test.js` pins the extraction and
+the excuse list. Both are ports from the plugin, kept step-for-step compatible on purpose.

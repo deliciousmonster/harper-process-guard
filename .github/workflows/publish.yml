@@ -1,0 +1,63 @@
+name: Publish
+
+on:
+  # A hand-pushed v* tag is the only publish trigger; a merge alone ships nothing.
+  push:
+    tags: ['v*']
+
+jobs:
+  # The same workflow that gates every branch push, called whole, so a tag cannot publish on weaker checks than a PR merges on.
+  test:
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    needs: test
+    runs-on: ubuntu-latest
+    # An npm ci and a publish; the margin is for a runner that never schedules.
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # `npm publish --provenance` mints an attestation from this OIDC token, recording which commit produced the tarball.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+          cache: 'npm'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: npm ci
+
+      # The flag is load-bearing: three adversarial reviews found this module unsound while its suite was green, so shipping is refused until the checklist says otherwise.
+      - name: Refuse to publish while package.json says private
+        run: |
+          node -e '
+            const manifest = JSON.parse(require("node:fs").readFileSync("package.json", "utf8"));
+            if (manifest.private) {
+              console.log("::error::package.json still carries \"private\": true. The flag is deliberate; it comes off when the \"Before it moves out\" checklist at the end of README.md is empty, and not before. Empty the checklist, remove the flag, then re-tag.");
+              process.exit(1);
+            }
+          '
+
+      # A tag naming one version while the manifest carries another would ship the wrong bits under a traceable name.
+      - name: Refuse a tag that disagrees with package.json
+        run: |
+          node -e '
+            const { version } = JSON.parse(require("node:fs").readFileSync("package.json", "utf8"));
+            const tag = process.env.GITHUB_REF_NAME;
+            if (tag !== `v${version}`) {
+              console.log(`::error::Tag ${tag} does not match package.json version ${version}. Bump the version or move the tag so the two agree, then push the tag again.`);
+              process.exit(1);
+            }
+          '
+
+      # prepublishOnly runs the build, so the tarball carries a dist/ compiled from this checkout and nothing stale.
+      - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --provenance --access public

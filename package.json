@@ -40,7 +40,9 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"lint": "oxlint",
-		"test": "npm run build && node --test \"test/**/*.test.js\""
+		"test": "npm run build && node --test \"test/**/*.test.js\"",
+		"ci:local": "node scripts/ci-local.js",
+		"prepublishOnly": "npm run build"
 	},
 	"private": true,
 	"devDependencies": {

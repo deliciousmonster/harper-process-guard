@@ -1,0 +1,61 @@
+name: Test
+
+on:
+  # These suites are hermetic (real processes, no network), so every branch runs them; "**" matches branches only, so tag pushes stay with publish.yml.
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+  # publish.yml runs this workflow whole as its gate, so the publish path cannot drift onto weaker checks.
+  workflow_call:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Both platforms on purpose: several e2e cases assert different outcomes per platform, and that divergence is the design, not flake.
+        os: [ubuntu-latest, macos-latest]
+        # Harper v5 declares engines.node "^22.18.0 || >=24.0.0", so 22 and 24 are the two versions that exist in the field.
+        node: ['22', '24']
+    runs-on: ${{ matrix.os }}
+    # Sized against `npm ci` on a cold cache, not the suite, which runs in seconds.
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Type check
+        run: npm run typecheck
+
+      # `npm test` builds, then runs `node --test "test/**/*.test.js"`; the quotes make node expand the glob rather than the shell.
+      - name: Run npm test
+        run: npm test
+
+      # node --test exits 0 when its pattern matches nothing, so a renamed directory would turn the step above into a no-op that reports success.
+      - name: Guard against an empty test glob
+        shell: bash
+        run: |
+          count=$(find test -type f -name '*.test.js' | wc -l | tr -d ' ')
+          echo "Found $count *.test.js file(s) under test/:"
+          find test -type f -name '*.test.js' | sort | sed 's/^/  /'
+          if [ "$count" -eq 0 ]; then
+            echo "::error::No *.test.js files under test/; npm test ran nothing."
+            exit 1
+          fi
