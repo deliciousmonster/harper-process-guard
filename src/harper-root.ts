@@ -12,7 +12,9 @@ export function readHarperRootPath(): string | null {
 		if (!settingsPath) return null;
 		// rootPath is top level in harper-config.yaml: the one key readable off a single line without a YAML parser.
 		const settings = readFileSync(settingsPath, 'utf-8');
-		const rootPath = settings.match(/^rootPath[ \t]*:[ \t]*(.+?)[ \t]*(?:#.*)?$/m)?.[1].replace(/^(['"])(.*)\1$/, '$2');
+		const rootPath = settings
+			.match(/^rootPath[ \t]*:[ \t]*(.+?)[ \t]*(?:#.*)?$/m)?.[1]
+			?.replace(/^(['"])(.*)\1$/, '$2');
 		// Rejects `rootPath: null`, which Harper's own defaultConfig.yaml ships, and anything relative.
 		return rootPath && isAbsolute(rootPath) ? rootPath : null;
 	} catch {

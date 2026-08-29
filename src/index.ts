@@ -4,11 +4,13 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { threadId } from 'node:worker_threads';
 
+import { errorMessage } from './errors.js';
 import { harperIdentity } from './identity.js';
-import { oncePerProcess, type ProcessIdentity } from './once.js';
+import { oncePerProcess, type OnceOutcome, type ProcessIdentity } from './once.js';
 import { describeSweep, sweepStaleLocks, type SweepAction, type SweepTarget } from './sweep.js';
 import {
 	assertConstrainedSpawn,
+	DEFAULT_REAPER_NAME,
 	fingerprint,
 	launchReaper,
 	startProcess,
@@ -46,67 +48,65 @@ export {
 	type ReapTarget,
 } from './reaper.js';
 
-const DEFAULT_REAPER_NAME = 'harper-process-guard-reaper';
-
 const NO_LOG: GuardLog = { info: () => {}, warn: () => {}, error: () => {} };
 
 /** One process under the guard's care: the sweep target, plus how to start and prove it when `spawn` is given. */
 export interface BootstrapProcess {
 	/** Harper's spawn `name`, which is also the PID-lock filename. */
-	name: string;
+	readonly name: string;
 	/** Absolute path of the binary. Give this or `resolve`. */
-	binaryPath?: string;
+	readonly binaryPath?: string;
 	/** Per-process spawn version. Mutually exclusive with bootstrap's `fingerprintParts`. */
-	version?: number;
+	readonly version?: number;
 	/** Resolves the binary path; awaited before the sweep, and a throw disables only this process. */
-	resolve?: () => string | Promise<string>;
-	args?: string[];
+	readonly resolve?: () => string | Promise<string>;
+	readonly args?: readonly string[];
 	/** How messages name it. Defaults to `name`. */
-	title?: string;
+	readonly title?: string;
 	/** Appended to the non-zero-exit report, for the caller's domain knowledge. */
-	exitHint?: string;
+	readonly exitHint?: string;
 	/** Proves the process does its job; awaited after the reaper launch, verdict recorded on the state. */
-	verify?: (state: ProcessState) => Promise<{ ok: boolean; detail?: string }>;
+	readonly verify?: (state: ProcessState) => Promise<{ ok: boolean; detail?: string }>;
 }
 
 /** How bootstrap() launches the guard's own reaper. `false` skips it. */
 export interface BootstrapReaper {
 	/** Harper spawn name for the reaper, which is also ITS lock filename. */
-	name?: string;
-	logFile?: string;
-	restartGraceMs?: number;
+	readonly name?: string;
+	readonly logFile?: string;
+	readonly restartGraceMs?: number;
 	/** Appended to the started log, naming what the reaper stops in the caller's terms. */
-	startedHint?: string;
+	readonly startedHint?: string;
 	/** Appended wherever a missing or dead reaper means the processes outlive the node. */
-	outliveHint?: string;
+	readonly outliveHint?: string;
 }
 
 export interface BootstrapOptions {
 	/** Where Harper's PID locks live. Defaults to `<rootPath>/pids`; without either, the sweep is reported as skipped. */
-	pidDir?: string;
-	processes: BootstrapProcess[];
+	readonly pidDir?: string;
+	readonly processes: readonly BootstrapProcess[];
 	/** How long a waiting thread holds before giving up; giving up early releases threads into the race this prevents. */
-	timeoutMs?: number;
+	readonly timeoutMs?: number;
 	/** Whether an identified orphan may be stopped. Off by default; the kill path is where every serious hazard lives. */
-	stopOrphans?: boolean;
+	readonly stopOrphans?: boolean;
 	/** Distinguishes callers sharing one pid directory, so neither reads the other's completed marker as its own. */
-	namespace?: string;
+	readonly namespace?: string;
 	/** Overrides how this process identifies itself. See oncePerProcess. */
-	identity?: ProcessIdentity;
+	readonly identity?: ProcessIdentity;
 	/** Harper's root path: identifies this process from hdb.pid, and locates the pids/ directory and the reaper's files. */
-	rootPath?: string;
+	readonly rootPath?: string;
 	/** Harper's constrained spawn, from the caller's own import. Presence enables the full lifecycle. */
-	spawn?: ConstrainedSpawn;
+	readonly spawn?: ConstrainedSpawn;
 	/** Where the guard's messages land. Defaults to a no-op. */
-	log?: GuardLog;
+	readonly log?: GuardLog;
 	/** Inputs to fingerprint(); the computed version drives every spawn. Mutually exclusive with per-process `version`. */
-	fingerprintParts?: unknown[];
+	readonly fingerprintParts?: readonly unknown[];
 	/** Files written atomically after the sweep, path to contents; a rereading process sees old or new, never torn. */
-	configFiles?: Record<string, string>;
+	readonly configFiles?: Readonly<Record<string, string>>;
 	/** The guard's reaper, launched by default when the lifecycle runs; `false` skips it. */
-	reaper?: BootstrapReaper | false;
+	readonly reaper?: BootstrapReaper | false;
 	/** Appended to the not-intercepted report, restoring the concrete consequence the generic message cannot name. */
-	interceptionHint?: string;
+	readonly interceptionHint?: string;
 }
 
 export interface BootstrapResult {
@@ -117,7 +117,7 @@ export interface BootstrapResult {
 	/** One line per action, plus a line when the sweep could not be established at all. */
 	report: string[];
 	/** Whether the spawn proved to be Harper's constrained one. Only set when `spawn` was given. */
-	intercepted?: boolean;
+	intercepted?: boolean | undefined;
 	/** The version computed from fingerprintParts and passed to every spawn. */
 	version?: number;
 	/** One state per declared process, in declaration order. */
@@ -126,7 +126,7 @@ export interface BootstrapResult {
 }
 
 /** Marker filename, derived from the process names so two components sharing one pid directory cannot collide. */
-function markerKey(namespace: string | undefined, processes: BootstrapProcess[]): string {
+function markerKey(namespace: string | undefined, processes: readonly BootstrapProcess[]): string {
 	const suffix =
 		namespace ??
 		processes
@@ -137,7 +137,7 @@ function markerKey(namespace: string | undefined, processes: BootstrapProcess[])
 }
 
 /** Write each file via temp-and-rename; rename within one directory is atomic, so no reader meets a torn file. */
-function writeConfigFiles(configFiles: Record<string, string>, log: GuardLog): void {
+function writeConfigFiles(configFiles: Readonly<Record<string, string>>, log: GuardLog): void {
 	for (const [target, contents] of Object.entries(configFiles)) {
 		try {
 			mkdirSync(dirname(target), { recursive: true });
@@ -145,7 +145,7 @@ function writeConfigFiles(configFiles: Record<string, string>, log: GuardLog): v
 			writeFileSync(temp, contents, 'utf-8');
 			renameSync(temp, target);
 		} catch (error) {
-			log.error(`process guard: could not write ${target}: ${(error as Error).message}`);
+			log.error(`process guard: could not write ${target}: ${errorMessage(error)}`);
 		}
 	}
 }
@@ -162,20 +162,20 @@ async function runSweep({
 	processes,
 }: {
 	pidDir: string;
-	targets: SweepTarget[];
-	namespace?: string;
-	timeoutMs?: number;
+	targets: readonly SweepTarget[];
+	namespace?: string | undefined;
+	timeoutMs?: number | undefined;
 	stopOrphans: boolean;
-	identity?: ProcessIdentity;
-	rootPath?: string;
-	processes: BootstrapProcess[];
+	identity?: ProcessIdentity | undefined;
+	rootPath?: string | undefined;
+	processes: readonly BootstrapProcess[];
 }): Promise<Pick<BootstrapResult, 'swept' | 'actions' | 'report'>> {
 	// The default allows for every process being an orphan that has to be stopped in turn, plus room.
 	const budget = timeoutMs ?? Math.max(30_000, targets.length * 10_000);
 	// Prefer what the caller knows, then Harper's own hdb.pid, then whatever the OS offers.
 	const resolved = identity ?? (rootPath ? (harperIdentity(rootPath) ?? undefined) : undefined);
 
-	let outcome;
+	let outcome: OnceOutcome<SweepAction[]>;
 	try {
 		outcome = await oncePerProcess(
 			pidDir,
@@ -188,7 +188,7 @@ async function runSweep({
 			swept: false,
 			actions: [],
 			report: [
-				`the startup lock sweep failed (${(error as Error).message}), so the PID locks under ` +
+				`the startup lock sweep failed (${errorMessage(error)}), so the PID locks under ` +
 					`${pidDir} have not been checked. A process recorded there by an earlier boot may be ` +
 					`adopted instead of started.`,
 			],
@@ -196,7 +196,7 @@ async function runSweep({
 	}
 
 	if (outcome.ran) {
-		const actions = outcome.result as SweepAction[];
+		const actions = outcome.result;
 		return { swept: true, actions, report: describeSweep(actions) };
 	}
 
@@ -243,14 +243,15 @@ export async function bootstrap({
 		: undefined;
 
 	// Resolved before the sweep, which needs binaryPath to identify a lock's process; one bad binary disables only itself.
-	const resolutions = await Promise.all(
-		processes.map(async (proc) => {
+	// Each resolution rides beside its process, so nothing downstream lines up parallel arrays by index.
+	const prepared = await Promise.all(
+		processes.map(async (proc): Promise<{ proc: BootstrapProcess; binaryPath: string; resolveError?: string }> => {
 			try {
-				return { binaryPath: proc.resolve ? String(await proc.resolve()) : (proc.binaryPath ?? '') };
+				return { proc, binaryPath: proc.resolve ? String(await proc.resolve()) : (proc.binaryPath ?? '') };
 			} catch (error) {
-				const message = (error as Error).message;
+				const message = errorMessage(error);
 				log.error(`process guard: could not resolve the ${proc.title ?? proc.name} binary: ${message}`);
-				return { binaryPath: '', resolveError: message };
+				return { proc, binaryPath: '', resolveError: message };
 			}
 		})
 	);
@@ -261,9 +262,9 @@ export async function bootstrap({
 	const swept = lockDir
 		? await runSweep({
 				pidDir: lockDir,
-				targets: processes.map((proc, index) => ({
+				targets: prepared.map(({ proc, binaryPath }) => ({
 					name: proc.name,
-					binaryPath: resolutions[index].binaryPath,
+					binaryPath,
 					version: version ?? proc.version,
 				})),
 				namespace,
@@ -288,23 +289,23 @@ export async function bootstrap({
 
 	if (!spawn) return swept;
 
-	const states: ProcessState[] = [];
-	for (const [index, proc] of processes.entries()) {
+	const jobs = prepared.map(({ proc, binaryPath, resolveError }) => {
 		const state = startProcess(
 			spawn,
 			{
 				name: proc.name,
 				title: proc.title,
-				binaryPath: resolutions[index].binaryPath,
+				binaryPath,
 				args: proc.args ?? [],
 				exitHint: proc.exitHint,
 			},
 			{ version: version ?? proc.version, log }
 		);
 		// The resolve error is the actionable one; startProcess only knows the path never arrived.
-		if (resolutions[index].resolveError) state.error = resolutions[index].resolveError;
-		states.push(state);
-	}
+		if (resolveError) state.error = resolveError;
+		return { proc, state };
+	});
+	const states = jobs.map(({ state }) => state);
 
 	let reaper: ReaperState | undefined;
 	if (reaperOptions !== false) {
@@ -336,9 +337,8 @@ export async function bootstrap({
 	}
 
 	// After the reaper launch: a verify may wait 30s, and a node killed inside that window must not orphan the children.
-	for (const [index, proc] of processes.entries()) {
+	for (const { proc, state } of jobs) {
 		if (!proc.verify) continue;
-		const state = states[index];
 		try {
 			const { ok, detail } = await proc.verify(state);
 			state.verified = ok;
@@ -348,7 +348,7 @@ export async function bootstrap({
 			else log.error(line);
 		} catch (error) {
 			state.verified = false;
-			state.verifyDetail = (error as Error).message;
+			state.verifyDetail = errorMessage(error);
 			log.error(`process guard: the ${state.title} failed verification: ${state.verifyDetail}`);
 		}
 	}

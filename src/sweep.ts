@@ -29,6 +29,7 @@ import { unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 
+import { errnoCode } from './errors.js';
 import { identificationCanAuthoriseSignal, identify, isAlive, readLock } from './identity.js';
 
 /** How long an identified orphan gets to exit after SIGTERM before it is reported as staying. */
@@ -37,9 +38,9 @@ const STOP_POLL_MS = 50;
 
 export interface SweepTarget {
 	/** Harper's spawn `name`, which is the lock filename without `.pid`. */
-	name: string;
+	readonly name: string;
 	/** Absolute path of the binary, used to identify an orphan. Resolve it before calling. */
-	binaryPath: string;
+	readonly binaryPath: string;
 	/**
 	 * The `version` this caller is about to pass to Harper's spawn, when it passes one.
 	 *
@@ -50,22 +51,22 @@ export interface SweepTarget {
 	 * process this node is about to inherit, and stopping it drops whatever it was carrying.
 	 * Only a mismatch means the lock describes a configuration that no longer exists.
 	 */
-	version?: number;
+	readonly version?: number | undefined;
 }
 
 export type SweepAction =
-	| { name: string; pid: number; action: 'removed-dead' }
+	| { readonly name: string; readonly pid: number; readonly action: 'removed-dead' }
 	/** Ours, alive, and still current. Left running for this node to adopt. */
-	| { name: string; pid: number; action: 'kept-for-adoption' }
+	| { readonly name: string; readonly pid: number; readonly action: 'kept-for-adoption' }
 	/** Ours, alive, stale configuration, and not signalled: either not asked for or not permitted. */
-	| { name: string; pid: number; action: 'reported-orphan' }
+	| { readonly name: string; readonly pid: number; readonly action: 'reported-orphan' }
 	/** A lock we could not adjudicate, because the binary path never resolved. */
-	| { name: string; pid: number; action: 'skipped-unresolved' }
-	| { name: string; pid: number; action: 'stopped-orphan' }
-	| { name: string; pid: number; action: 'orphan-survived' }
-	| { name: string; pid: number; action: 'removed-foreign' }
-	| { name: string; pid: number; action: 'removed-unidentifiable' }
-	| { name: string; pid: number; action: 'skipped-changed' };
+	| { readonly name: string; readonly pid: number; readonly action: 'skipped-unresolved' }
+	| { readonly name: string; readonly pid: number; readonly action: 'stopped-orphan' }
+	| { readonly name: string; readonly pid: number; readonly action: 'orphan-survived' }
+	| { readonly name: string; readonly pid: number; readonly action: 'removed-foreign' }
+	| { readonly name: string; readonly pid: number; readonly action: 'removed-unidentifiable' }
+	| { readonly name: string; readonly pid: number; readonly action: 'skipped-changed' };
 
 /**
  * Remove stale locks for `targets`, stopping any orphan positively identified as ours.
@@ -81,7 +82,7 @@ export async function sweepStaleLocks({
 	stopTimeoutMs = STOP_TIMEOUT_MS,
 }: {
 	pidDir: string;
-	targets: SweepTarget[];
+	targets: readonly SweepTarget[];
 	/** Whether an identified orphan may be signalled. See bootstrap()'s option of the same name. */
 	stopOrphans?: boolean;
 	stopTimeoutMs?: number;
@@ -182,7 +183,7 @@ export async function sweepStaleLocks({
 	return actions;
 }
 
-function entry(target: SweepTarget, pid: number) {
+function entry(target: SweepTarget, pid: number): { name: string; pid: number } {
 	return { name: target.name, pid };
 }
 
@@ -207,12 +208,12 @@ export function removeIfStill(lockPath: string, pid: number | null): boolean {
 		// ENOENT is the outcome asked for. Anything else means the file is still there, and
 		// reporting a removal that did not happen is worse than reporting nothing: the caller
 		// logs a repair, and the lock is adopted on the next start regardless.
-		return (error as NodeJS.ErrnoException).code === 'ENOENT';
+		return errnoCode(error) === 'ENOENT';
 	}
 }
 
 /** One line per action, for a caller that logs into Harper's own sink. */
-export function describeSweep(actions: SweepAction[]): string[] {
+export function describeSweep(actions: readonly SweepAction[]): string[] {
 	return actions.map((a) => {
 		switch (a.action) {
 			case 'removed-dead':

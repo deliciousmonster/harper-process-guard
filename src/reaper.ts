@@ -29,6 +29,7 @@ import { closeSync, existsSync, openSync, readFileSync, unlinkSync, writeSync } 
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
+import { errorMessage } from './errors.js';
 import { identificationCanAuthoriseSignal, identify, isAlive } from './identity.js';
 
 /** How often the watched process is checked. */
@@ -39,11 +40,11 @@ const TERM_GRACE_MS = 5000;
 
 export interface ReapTarget {
 	/** The lock file naming this child, removed before it is signalled. */
-	pidFile: string;
+	readonly pidFile: string;
 	/** The pid this reaper watched start. First-hand, unlike anything read from a file. */
-	pid: number;
+	readonly pid: number;
 	/** Absolute path of the binary, so the child can be identified before it is signalled. */
-	binaryPath: string;
+	readonly binaryPath: string;
 }
 
 export interface ReaperOptions {
@@ -81,7 +82,7 @@ function log(options: ReaperOptions, message: string): void {
 
 function readPidFile(path: string): number | null {
 	try {
-		const pid = Number.parseInt(readFileSync(path, 'utf-8').trim().split('\n')[0], 10);
+		const pid = Number.parseInt(readFileSync(path, 'utf-8').trim().split('\n')[0] ?? '', 10);
 		return Number.isInteger(pid) ? pid : null;
 	} catch {
 		return null;
@@ -147,7 +148,7 @@ export async function reapTarget(options: ReaperOptions, target: ReapTarget): Pr
 			process.kill(pid, 'SIGTERM');
 			log(options, `sent SIGTERM to ${pid} (${target.pidFile})`);
 		} catch (error) {
-			log(options, `could not SIGTERM ${pid}: ${(error as Error).message}`);
+			log(options, `could not SIGTERM ${pid}: ${errorMessage(error)}`);
 		}
 	}
 
@@ -162,7 +163,7 @@ export async function reapTarget(options: ReaperOptions, target: ReapTarget): Pr
 			process.kill(pid, 'SIGKILL');
 			log(options, `${pid} ignored SIGTERM for ${TERM_GRACE_MS}ms; sent SIGKILL`);
 		} catch (error) {
-			log(options, `could not SIGKILL ${pid}: ${(error as Error).message}`);
+			log(options, `could not SIGKILL ${pid}: ${errorMessage(error)}`);
 		}
 	}
 }
@@ -219,6 +220,9 @@ export function parseArgs(argv: string[]): ReaperOptions {
 	const options: ReaperOptions = { harperPid: Number.NaN, targets: [], restartGraceMs: 8000 };
 	for (let i = 0; i < argv.length; i++) {
 		const value = argv[i + 1];
+		// Every flag takes a value, so a flag arriving as the final token has nothing to
+		// consume; without this, `--target` at the end would hand undefined to Buffer.from.
+		if (value === undefined) break;
 		switch (argv[i]) {
 			case '--harper-pid':
 				options.harperPid = Number.parseInt(value, 10);
@@ -242,15 +246,26 @@ export function parseArgs(argv: string[]): ReaperOptions {
 				break;
 			case '--target':
 				try {
-					const decoded = JSON.parse(Buffer.from(value, 'base64').toString('utf-8'));
-					options.targets.push({
-						pidFile: String(decoded.pidFile),
-						pid: Number.parseInt(decoded.pid, 10),
-						binaryPath: String(decoded.binaryPath ?? ''),
-					});
+					const decoded: unknown = JSON.parse(Buffer.from(value, 'base64').toString('utf-8'));
+					// Validated field by field for the same reason it is dropped on a parse
+					// failure below: a descriptor that cannot be read names nothing this may
+					// act on, so a wrong shape is dropped rather than guessed at.
+					if (
+						typeof decoded === 'object' &&
+						decoded !== null &&
+						'pidFile' in decoded &&
+						typeof decoded.pidFile === 'string' &&
+						'pid' in decoded &&
+						(typeof decoded.pid === 'number' || typeof decoded.pid === 'string')
+					) {
+						options.targets.push({
+							pidFile: decoded.pidFile,
+							pid: Number(decoded.pid),
+							binaryPath: 'binaryPath' in decoded && typeof decoded.binaryPath === 'string' ? decoded.binaryPath : '',
+						});
+					}
 				} catch {
-					// A descriptor that cannot be read names nothing this may act on, so it is
-					// dropped rather than guessed at.
+					// Not base64, or not JSON. Dropped, same as a wrong shape above.
 				}
 				i++;
 				break;
@@ -273,7 +288,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 	// index.ts re-exports this file, so require() of the package entry point would throw
 	// ERR_REQUIRE_ASYNC_MODULE. test/unit/require-entry.test.js pins that and caught it.
 	run(options).catch((error: unknown) => {
-		process.stderr.write(`reaper: ${(error as Error).message}\n`);
+		process.stderr.write(`reaper: ${errorMessage(error)}\n`);
 		process.exit(1);
 	});
 }

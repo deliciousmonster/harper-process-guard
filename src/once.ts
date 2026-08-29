@@ -25,6 +25,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 
+import { errnoCode } from './errors.js';
 import { processStartToken } from './identity.js';
 
 /** How often a waiting thread re-reads the marker. */
@@ -43,11 +44,11 @@ const SAME_PROCESS_TOLERANCE_MS = 5000;
 
 /** Identity of the Harper process, agreed by every one of its threads without coordination. */
 export interface ProcessIdentity {
-	pid: number;
+	readonly pid: number;
 	/** The OS's recorded start, when the platform has one. Compared for exact equality. */
-	token?: string | null;
+	readonly token?: string | null;
 	/** Derived fallback, only consulted when `token` is absent on both sides. */
-	startedAt: number;
+	readonly startedAt: number;
 }
 
 export function currentProcess(): ProcessIdentity {
@@ -75,15 +76,26 @@ function isSameProcess(a: ProcessIdentity, b: ProcessIdentity): boolean {
 
 interface Marker extends ProcessIdentity {
 	/** Set by the winner only after the work has returned. */
-	done: boolean;
+	readonly done: boolean;
 	/** Thread that claimed it, for the report. Never used for a decision. */
-	thread: number;
+	readonly thread: number;
 }
 
 function readMarker(path: string): Marker | null {
 	try {
-		const parsed = JSON.parse(readFileSync(path, 'utf-8')) as Marker;
-		return typeof parsed?.pid === 'number' && typeof parsed?.startedAt === 'number' ? parsed : null;
+		const parsed: unknown = JSON.parse(readFileSync(path, 'utf-8'));
+		if (typeof parsed !== 'object' || parsed === null) return null;
+		if (!('pid' in parsed) || typeof parsed.pid !== 'number') return null;
+		if (!('startedAt' in parsed) || typeof parsed.startedAt !== 'number') return null;
+		// Field by field rather than one cast, because `done` is what releases waiters: it has
+		// to mean boolean true, never whatever truthy value a mangled file happens to carry.
+		return {
+			pid: parsed.pid,
+			startedAt: parsed.startedAt,
+			token: 'token' in parsed && typeof parsed.token === 'string' ? parsed.token : null,
+			done: 'done' in parsed && parsed.done === true,
+			thread: 'thread' in parsed && typeof parsed.thread === 'number' ? parsed.thread : -1,
+		};
 	} catch {
 		// Absent, unreadable, half-written or not JSON. All mean "no usable claim", and a
 		// half-written marker is possible because the winner writes it in two steps.
@@ -98,9 +110,9 @@ function writeMarker(path: string, marker: Marker): void {
 	renameSync(temp, path);
 }
 
-export type OnceOutcome =
+export type OnceOutcome<T = unknown> =
 	/** This thread ran the work. */
-	| { ran: true; result: unknown }
+	| { ran: true; result: T }
 	/** Another thread of this process ran it, and it has finished. */
 	| { ran: false; waited: true }
 	/** Nobody ran it here. The caller must decide whether its precondition holds. */
@@ -128,8 +140,8 @@ export async function oncePerProcess<T>(
 	dir: string,
 	key: string,
 	work: () => Promise<T>,
-	{ timeoutMs = 60_000, identity }: { timeoutMs?: number; identity?: ProcessIdentity } = {}
-): Promise<OnceOutcome> {
+	{ timeoutMs = 60_000, identity }: { timeoutMs?: number; identity?: ProcessIdentity | undefined } = {}
+): Promise<OnceOutcome<T>> {
 	mkdirSync(dir, { recursive: true });
 	const path = join(dir, `.${key}.once`);
 	const me = identity ?? currentProcess();
@@ -140,7 +152,7 @@ export async function oncePerProcess<T>(
 		try {
 			closeSync(openSync(path, 'wx'));
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+			if (errnoCode(error) !== 'EEXIST') throw error;
 
 			const marker = readMarker(path);
 			if (marker && isSameProcess(marker, me) && marker.done) return { ran: false, waited: true };
@@ -208,6 +220,6 @@ function tryUnlink(path: string): boolean {
 		unlinkSync(path);
 		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === 'ENOENT';
+		return errnoCode(error) === 'ENOENT';
 	}
 }

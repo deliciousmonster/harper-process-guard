@@ -14,7 +14,7 @@ function fetchInsecure(url: string, timeoutMs: number): Promise<string | null> {
 			}
 			let body = '';
 			response.setEncoding('utf-8');
-			response.on('data', (chunk) => (body += chunk));
+			response.on('data', (chunk: string) => (body += chunk));
 			response.on('end', () => resolve(body));
 		});
 		call.on('timeout', () => call.destroy());

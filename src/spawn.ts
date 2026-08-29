@@ -3,18 +3,20 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
+import { errorMessage } from './errors.js';
+
 /** The caller's logger. Nothing here writes to a console nobody reads. */
 export interface GuardLog {
-	info(message: string): void;
-	warn(message: string): void;
-	error(message: string): void;
+	readonly info: (message: string) => void;
+	readonly warn: (message: string) => void;
+	readonly error: (message: string) => void;
 }
 
 /** Harper's constrained spawn, as the component receives it. */
 export type ConstrainedSpawn = (
 	command: string,
 	args: string[],
-	options: { name: string; version?: number; stdio: ['ignore', 'ignore', 'ignore']; env: NodeJS.ProcessEnv }
+	options: { name: string; version?: number | undefined; stdio: ['ignore', 'ignore', 'ignore']; env: NodeJS.ProcessEnv }
 ) => SpawnedChild;
 
 /** What Harper's spawn returns: a real ChildProcess, or an ExistingProcessWrapper for losers. */
@@ -22,20 +24,20 @@ export interface SpawnedChild {
 	pid?: number;
 	spawnargs?: string[];
 	on(event: 'error', listener: (error: NodeJS.ErrnoException) => void): unknown;
-	on(event: 'exit', listener: (code: number | null, signal: string | null) => void): unknown;
+	on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
 	unref(): void;
 }
 
 export interface ManagedProcess {
 	/** Harper's spawn `name`, which is also the PID-lock filename. */
-	name: string;
+	readonly name: string;
 	/** How messages name it. Defaults to `name`. */
-	title?: string;
+	readonly title?: string | undefined;
 	/** Absolute path of the binary. Resolve it before calling; an empty string is reported, not spawned. */
-	binaryPath: string;
-	args: string[];
+	readonly binaryPath: string;
+	readonly args: readonly string[];
 	/** Appended to the non-zero-exit report, for the caller's domain knowledge ("port in use" and the like). */
-	exitHint?: string;
+	readonly exitHint?: string | undefined;
 }
 
 export interface ProcessState {
@@ -45,13 +47,14 @@ export interface ProcessState {
 	started: boolean;
 	/** True when this thread lost the PID-file race and joined an existing process. */
 	adopted?: boolean;
-	pid?: number;
-	exited?: boolean;
-	error?: string;
+	/** Undefined is an assigned value on the three fields below: a respawn clears them through this type. */
+	pid?: number | undefined;
+	exited?: boolean | undefined;
+	error?: string | undefined;
 	respawnAttempts?: number;
 	/** Set by bootstrap() from the caller's verify(): whether the process proved it does its job. */
 	verified?: boolean;
-	verifyDetail?: string;
+	verifyDetail?: string | undefined;
 }
 
 const RESPAWN_MAX_ATTEMPTS = 5;
@@ -89,7 +92,7 @@ const PROBE_COMMAND = 'harper-process-guard-spawn-probe-must-not-exist';
 export function assertConstrainedSpawn(
 	spawn: ConstrainedSpawn,
 	log: GuardLog,
-	hint?: string | { notInterceptedHint?: string }
+	hint?: string | { readonly notInterceptedHint?: string | undefined }
 ): { intercepted: boolean; detail: string } {
 	const notInterceptedHint = typeof hint === 'string' ? hint : hint?.notInterceptedHint;
 	let child: SpawnedChild;
@@ -100,7 +103,7 @@ export function assertConstrainedSpawn(
 			env: process.env,
 		});
 	} catch (error) {
-		const message = (error as Error).message;
+		const message = errorMessage(error);
 		if (/is not allowed/.test(message)) {
 			log.info(
 				`process guard: Harper's constrained child_process is active (probe rejected with ` +
@@ -139,7 +142,7 @@ export function assertConstrainedSpawn(
 export function startProcess(
 	spawn: ConstrainedSpawn,
 	descriptor: ManagedProcess,
-	{ version, log, logDirHint }: { version?: number; log: GuardLog; logDirHint?: string },
+	{ version, log, logDirHint }: { version?: number | undefined; log: GuardLog; logDirHint?: string | undefined },
 	existingState: ProcessState | null = null,
 	attempt = 0
 ): ProcessState {
@@ -160,14 +163,15 @@ export function startProcess(
 		if (!descriptor.binaryPath) throw new Error('its path could not be resolved');
 		preflightBinary(title, descriptor.binaryPath);
 	} catch (error) {
-		state.error = (error as Error).message;
+		state.error = errorMessage(error);
 		log.error(`process guard: cannot start the ${title}: ${state.error}`);
 		return state;
 	}
 
 	let child: SpawnedChild;
 	try {
-		child = spawn(descriptor.binaryPath, descriptor.args, {
+		// Copied because the descriptor's args are readonly and Harper's spawn takes a mutable array.
+		child = spawn(descriptor.binaryPath, [...descriptor.args], {
 			name: descriptor.name,
 			version,
 			// Never piped: a pipe ties the child to the winning thread, which harper dev recycles on every save.
@@ -175,7 +179,7 @@ export function startProcess(
 			env: process.env,
 		});
 	} catch (error) {
-		state.error = (error as Error).message;
+		state.error = errorMessage(error);
 		log.error(
 			`process guard: Harper refused to spawn the ${title}: ${state.error}. If this says ` +
 				`"is not allowed", add this exact absolute path to applications.allowedSpawnCommands ` +
@@ -272,10 +276,13 @@ export interface ReaperState {
 	started: boolean;
 	/** True when this thread lost the reaper's own PID-file race and joined the winner's. */
 	adopted?: boolean;
-	pid?: number;
+	pid?: number | undefined;
 	command?: string;
 	error?: string;
 }
+
+/** The reaper's default Harper spawn name, which is also its lock filename; bootstrap() reports it when no reaper can launch. */
+export const DEFAULT_REAPER_NAME = 'harper-process-guard-reaper';
 
 /** Start the guard's reaper, or say why it was not; never fatal, since without one the processes merely outlive the node. */
 export function launchReaper(
@@ -288,7 +295,7 @@ export function launchReaper(
 		version,
 		log,
 		logFile,
-		name = 'harper-process-guard-reaper',
+		name = DEFAULT_REAPER_NAME,
 		restartGraceMs = 8000,
 		startedHint,
 		outliveHint,
@@ -297,9 +304,9 @@ export function launchReaper(
 		reaperScript: string;
 		rootPath: string;
 		/** Where the PID locks live. Defaults to `<rootPath>/pids`. */
-		pidDir?: string;
-		processes: ProcessState[];
-		version?: number;
+		pidDir?: string | undefined;
+		processes: readonly ProcessState[];
+		version?: number | undefined;
 		log: GuardLog;
 		logFile?: string;
 		/** Harper spawn name for the reaper itself, which is also ITS lock filename. */
@@ -367,7 +374,7 @@ export function launchReaper(
 			state.command = command;
 			break;
 		} catch (error) {
-			refusals.push(`${command}: ${(error as Error).message}`);
+			refusals.push(`${command}: ${errorMessage(error)}`);
 		}
 	}
 

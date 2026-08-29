@@ -16,6 +16,8 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, isAbsolute, join } from 'node:path';
 
+import { errnoCode } from './errors.js';
+
 /** True if some process holds this pid. EPERM counts: it exists, owned by another user. */
 export function isAlive(pid: number): boolean {
 	// Non-positive values are process-GROUP selectors to kill(2), not pids: 0 is the caller's
@@ -25,7 +27,7 @@ export function isAlive(pid: number): boolean {
 		process.kill(pid, 0);
 		return true;
 	} catch (error) {
-		return (error as NodeJS.ErrnoException).code === 'EPERM';
+		return errnoCode(error) === 'EPERM';
 	}
 }
 
@@ -119,9 +121,9 @@ export function identify(pid: number, binaryPath: string): Identification {
 export function readLock(path: string): { pid: number; version: number } | null {
 	try {
 		const lines = readFileSync(path, 'utf-8').trim().split('\n');
-		const pid = Number.parseInt(lines[0], 10);
+		const pid = Number.parseInt(lines[0] ?? '', 10);
 		if (!Number.isInteger(pid)) return null;
-		return { pid, version: lines.length > 1 ? Number.parseInt(lines[1], 10) : 0 };
+		return { pid, version: lines.length > 1 ? Number.parseInt(lines[1] ?? '', 10) : 0 };
 	} catch {
 		return null;
 	}

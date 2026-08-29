@@ -1,0 +1,21 @@
+{
+	// Type-checks the hand-written JS beside src/: the local CI runner and the shared test
+	// harness, whose JSDoc types propagate to every suite. Standalone rather than extending
+	// tsconfig.json: JSDoc carries plain strict well, while noUncheckedIndexedAccess would
+	// bury the runner's line parser under `?? ''` at every subscript it takes.
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
+		"lib": ["ES2022"],
+		"types": ["node"],
+		"allowJs": true,
+		"checkJs": true,
+		"noEmit": true,
+		"strict": true,
+		"esModuleInterop": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true
+	},
+	"files": ["scripts/ci-local.js", "test/support/harness.js"]
+}

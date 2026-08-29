@@ -36,7 +36,7 @@
 	},
 	"scripts": {
 		"build": "tsc",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"lint": "oxlint",

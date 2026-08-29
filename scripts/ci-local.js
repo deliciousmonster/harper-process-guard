@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+// @ts-check
 // Run the Test workflow's test job locally, with steps EXTRACTED from test.yml so the two cannot drift; --full adds npm ci.
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
@@ -23,6 +24,7 @@ export function testJobSteps() {
 	const end = lines.findIndex((line, index) => index > start && /^\s{2}\S+:\s*$/.test(line));
 	const body = lines.slice(start, end === -1 ? lines.length : end);
 
+	/** @type {{ name: string, run: string | null }[]} */
 	const steps = [];
 	for (let i = 0; i < body.length; i++) {
 		const named = body[i].match(/^\s*- name: (.+?)\s*$/);
@@ -36,10 +38,11 @@ export function testJobSteps() {
 				break;
 			}
 			if (/^\s+run: \|\s*$/.test(body[j])) {
-				const indent = body[j + 1].match(/^(\s*)/)[1].length;
+				// `?? ''` covers a `run: |` block that ends the file, which would otherwise crash here.
+				const indent = (body[j + 1] ?? '').match(/^(\s*)/)?.[1]?.length ?? 0;
 				const block = [];
 				for (let k = j + 1; k < body.length; k++) {
-					if (body[k].trim() !== '' && body[k].match(/^(\s*)/)[1].length < indent) break;
+					if (body[k].trim() !== '' && (body[k].match(/^(\s*)/)?.[1]?.length ?? 0) < indent) break;
 					block.push(body[k].slice(indent));
 				}
 				run = block.join('\n').trimEnd();
@@ -82,7 +85,9 @@ function main() {
 		} catch (error) {
 			failed++;
 			console.log(`  ✗ ${step.name}`);
-			const output = `${error.stdout ?? ''}${error.stderr ?? ''}`.trimEnd();
+			// execFileSync's throw carries the child's captured streams; nothing else lands here.
+			const failure = /** @type {{ stdout?: Buffer | string, stderr?: Buffer | string }} */ (error);
+			const output = `${failure.stdout ?? ''}${failure.stderr ?? ''}`.trimEnd();
 			console.log(
 				output
 					.split('\n')
