@@ -55,58 +55,58 @@ export interface BootstrapProcess {
 	/** Harper's spawn `name`, which is also the PID-lock filename. */
 	readonly name: string;
 	/** Absolute path of the binary. Give this or `resolve`. */
-	readonly binaryPath?: string;
+	readonly binaryPath?: string | undefined;
 	/** Per-process spawn version. Mutually exclusive with bootstrap's `fingerprintParts`. */
-	readonly version?: number;
+	readonly version?: number | undefined;
 	/** Resolves the binary path; awaited before the sweep, and a throw disables only this process. */
-	readonly resolve?: () => string | Promise<string>;
-	readonly args?: readonly string[];
+	readonly resolve?: (() => string | Promise<string>) | undefined;
+	readonly args?: readonly string[] | undefined;
 	/** How messages name it. Defaults to `name`. */
-	readonly title?: string;
+	readonly title?: string | undefined;
 	/** Appended to the non-zero-exit report, for the caller's domain knowledge. */
-	readonly exitHint?: string;
+	readonly exitHint?: string | undefined;
 	/** Proves the process does its job; awaited after the reaper launch, verdict recorded on the state. */
-	readonly verify?: (state: ProcessState) => Promise<{ ok: boolean; detail?: string }>;
+	readonly verify?: ((state: ProcessState) => Promise<{ ok: boolean; detail?: string }>) | undefined;
 }
 
 /** How bootstrap() launches the guard's own reaper. `false` skips it. */
 export interface BootstrapReaper {
 	/** Harper spawn name for the reaper, which is also ITS lock filename. */
-	readonly name?: string;
-	readonly logFile?: string;
-	readonly restartGraceMs?: number;
+	readonly name?: string | undefined;
+	readonly logFile?: string | undefined;
+	readonly restartGraceMs?: number | undefined;
 	/** Appended to the started log, naming what the reaper stops in the caller's terms. */
-	readonly startedHint?: string;
+	readonly startedHint?: string | undefined;
 	/** Appended wherever a missing or dead reaper means the processes outlive the node. */
-	readonly outliveHint?: string;
+	readonly outliveHint?: string | undefined;
 }
 
 export interface BootstrapOptions {
 	/** Where Harper's PID locks live. Defaults to `<rootPath>/pids`; without either, the sweep is reported as skipped. */
-	readonly pidDir?: string;
+	readonly pidDir?: string | undefined;
 	readonly processes: readonly BootstrapProcess[];
 	/** How long a waiting thread holds before giving up; giving up early releases threads into the race this prevents. */
-	readonly timeoutMs?: number;
+	readonly timeoutMs?: number | undefined;
 	/** Whether an identified orphan may be stopped. Off by default; the kill path is where every serious hazard lives. */
-	readonly stopOrphans?: boolean;
+	readonly stopOrphans?: boolean | undefined;
 	/** Distinguishes callers sharing one pid directory, so neither reads the other's completed marker as its own. */
-	readonly namespace?: string;
+	readonly namespace?: string | undefined;
 	/** Overrides how this process identifies itself. See oncePerProcess. */
-	readonly identity?: ProcessIdentity;
+	readonly identity?: ProcessIdentity | undefined;
 	/** Harper's root path: identifies this process from hdb.pid, and locates the pids/ directory and the reaper's files. */
-	readonly rootPath?: string;
+	readonly rootPath?: string | undefined;
 	/** Harper's constrained spawn, from the caller's own import. Presence enables the full lifecycle. */
-	readonly spawn?: ConstrainedSpawn;
+	readonly spawn?: ConstrainedSpawn | undefined;
 	/** Where the guard's messages land. Defaults to a no-op. */
-	readonly log?: GuardLog;
+	readonly log?: GuardLog | undefined;
 	/** Inputs to fingerprint(); the computed version drives every spawn. Mutually exclusive with per-process `version`. */
-	readonly fingerprintParts?: readonly unknown[];
+	readonly fingerprintParts?: readonly unknown[] | undefined;
 	/** Files written atomically after the sweep, path to contents; a rereading process sees old or new, never torn. */
-	readonly configFiles?: Readonly<Record<string, string>>;
+	readonly configFiles?: Readonly<Record<string, string>> | undefined;
 	/** The guard's reaper, launched by default when the lifecycle runs; `false` skips it. */
-	readonly reaper?: BootstrapReaper | false;
+	readonly reaper?: BootstrapReaper | false | undefined;
 	/** Appended to the not-intercepted report, restoring the concrete consequence the generic message cannot name. */
-	readonly interceptionHint?: string;
+	readonly interceptionHint?: string | undefined;
 }
 
 export interface BootstrapResult {
@@ -119,10 +119,10 @@ export interface BootstrapResult {
 	/** Whether the spawn proved to be Harper's constrained one. Only set when `spawn` was given. */
 	intercepted?: boolean | undefined;
 	/** The version computed from fingerprintParts and passed to every spawn. */
-	version?: number;
+	version?: number | undefined;
 	/** One state per declared process, in declaration order. */
-	processes?: ProcessState[];
-	reaper?: ReaperState;
+	processes?: ProcessState[] | undefined;
+	reaper?: ReaperState | undefined;
 }
 
 /** Marker filename, derived from the process names so two components sharing one pid directory cannot collide. */

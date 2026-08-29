@@ -308,14 +308,14 @@ export function launchReaper(
 		processes: readonly ProcessState[];
 		version?: number | undefined;
 		log: GuardLog;
-		logFile?: string;
+		logFile?: string | undefined;
 		/** Harper spawn name for the reaper itself, which is also ITS lock filename. */
-		name?: string;
-		restartGraceMs?: number;
+		name?: string | undefined;
+		restartGraceMs?: number | undefined;
 		/** Appended to the started log, naming what the reaper stops in the caller's terms. */
-		startedHint?: string;
+		startedHint?: string | undefined;
 		/** Appended wherever a missing or dead reaper means the processes outlive the node. */
-		outliveHint?: string;
+		outliveHint?: string | undefined;
 	}
 ): ReaperState {
 	const state: ReaperState = {
