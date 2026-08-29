@@ -229,8 +229,8 @@ test('a respawn clears exited and error left by the dead incarnation', async () 
 
 	await new Promise((r) => setTimeout(r, 1200));
 	assert.equal(spawns.length, 2, 'exit code 1 must produce one respawn');
-	// Pre-fix, exited and error survived the respawn beside the new pid, so one early death
-	// read as dead for the rest of the node's life.
+	// exited and error must reset on respawn, or one early death reads as dead
+	// for the rest of the node's life.
 	assert.equal(state.pid, spawns[1].pid);
 	assert.ok(!state.exited, 'exited survived the respawn');
 	assert.ok(!state.error, 'error survived the respawn');
@@ -249,8 +249,8 @@ test('a lost reaper race: adopted, the joined log, unref, and no started line', 
 			version: 7,
 			log,
 		});
-		// Pre-fix the wrapper branch fell through: every losing thread logged "reaper started"
-		// and no adopted flag existed, so eight threads read in the log as eight reapers.
+		// The wrapper branch must set adopted and skip the "reaper started" log, or
+		// eight losing threads read in the log as eight reapers.
 		assert.equal(state.adopted, true);
 		assert.equal(state.started, true);
 		assert.equal(child.unrefed, true, 'the wrapper interval pins the event loop until unref');
@@ -279,8 +279,8 @@ test('a reaper that dies non-zero warns; a clean exit or a signal stays silent',
 		child.emit('exit', null, 'SIGTERM');
 		assert.equal(log.lines.warn.length, 0, 'a clean exit or a stop must not warn');
 
-		// Pre-fix no exit listener existed: a crashed reaper left no line anywhere, and the
-		// next harper stop silently leaked every watched process.
+		// A crashed reaper must leave a warn line; silence here means the next harper
+		// stop leaks every watched process with no trace.
 		child.emit('exit', 1, null);
 		assert.equal(log.lines.warn.length, 1);
 		assert.match(log.lines.warn[0], /outlive this node/);

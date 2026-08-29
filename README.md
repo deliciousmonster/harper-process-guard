@@ -64,9 +64,9 @@ Node's real spawn instead.
 The returned status carries the sweep report, one state per process with the verify verdicts
 attached, and the reaper's.
 
-Without `spawn` the call is the sweep alone, and never starts anything: Harper's spawn is what
-enforces the binary allowlist and takes the lock, and the caller keeps composing the rest
-itself.
+Without `spawn` the call sweeps and writes any `configFiles`, and never starts anything:
+Harper's spawn is what enforces the binary allowlist and takes the lock, and the caller keeps
+composing the rest itself.
 
 `fingerprintParts` become the `version` on every spawn, and it matters. Harper adopts a lock
 whose version still matches, which is what `harper restart` relies on to hand running children
@@ -84,8 +84,8 @@ modules.
 
 ### bootstrap
 
-- `bootstrap(options)` sweeps stale locks once per Harper process, then, when `spawn` is given,
-  writes the config files, starts each process, launches the reaper and runs each `verify`.
+- `bootstrap(options)` sweeps stale locks once per Harper process and writes the config files;
+  when `spawn` is given it also starts each process, launches the reaper and runs each `verify`.
   Returns a `Promise<BootstrapResult>`.
 
 Types: `BootstrapOptions`, `BootstrapProcess` (one process under the guard's care: the sweep
@@ -198,7 +198,7 @@ Two rules bound it. Nothing is signalled without a positive identification: "not
 `/proc/<pid>/exe`, which the kernel fills in. On macOS `ps -o comm=` reports argv[0], which the
 examined process chooses: spawning `/bin/sleep` with `argv0` set to a copy named after your
 agent makes identification answer `match`. So on macOS a `match` justifies inaction, never a
-signal, and the sweep there removes locks without stopping anything.
+signal; when the sweep there acts, it acts by removing a lock, never by signalling.
 
 And stopping a process is opt-in: `stopOrphans` defaults to false. Removing a stale lock is what
 fixes the adopt-a-stranger defect and it signals nothing, while a signal sent on a wrong
@@ -250,8 +250,8 @@ npm run ci:local
 
 `npm test` builds with `tsc`, then runs `node --test "test/**/*.test.js"`. Each CI step also has
 its own script in `package.json`, but `npm run ci:local` is the one worth knowing: it extracts
-the Test workflow's steps from `test.yml` at run time and runs them in order, so the local gate
-cannot drift from CI; `--full` adds `npm ci`. CI itself runs the suite on ubuntu and macos, node
+the Test workflow's test-job steps from `test.yml` at run time and runs them in order, so that
+job cannot drift from CI (the actionlint job runs only in CI); `--full` adds `npm ci`. CI itself runs the suite on ubuntu and macos, node
 22 and 24, because several e2e cases assert different outcomes per platform, and that divergence
 is the design, not flake.
 

@@ -21,8 +21,8 @@ export type ConstrainedSpawn = (
 
 /** What Harper's spawn returns: a real ChildProcess, or an ExistingProcessWrapper for losers. */
 export interface SpawnedChild {
-	pid?: number;
-	spawnargs?: string[];
+	pid?: number | undefined;
+	spawnargs?: readonly string[] | undefined;
 	on(event: 'error', listener: (error: NodeJS.ErrnoException) => void): unknown;
 	on(event: 'exit', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown;
 	unref(): void;

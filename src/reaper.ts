@@ -160,7 +160,7 @@ export async function run(options: ReaperOptions): Promise<void> {
 	log(options, 'done.');
 }
 
-/** `--target <base64 json>` ({pidFile, pid, binaryPath}), repeatable. Base64 because the fields are absolute paths and the old colon-split spelling broke on a path containing one. */
+/** `--target <base64 json>` ({pidFile, pid, binaryPath}), repeatable. Base64 because every field is an absolute path and any single-character delimiter can appear inside one. */
 export function parseArgs(argv: string[]): ReaperOptions {
 	const options: ReaperOptions = { harperPid: Number.NaN, targets: [], restartGraceMs: 8000 };
 	for (let i = 0; i < argv.length; i++) {
