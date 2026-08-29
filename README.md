@@ -142,7 +142,8 @@ Types: `Identification`.
 - `launchReaper(spawn, options)` records each running process in a `<name>.guard.json`
   descriptor beside its lock, then starts the guard's reaper, or says in the returned
   `ReaperState` why it was not; never fatal, since without one the processes merely outlive the
-  node.
+  node. A thread that joins a reaper another thread launched watches it with a liveness poll of
+  its own, and a death sets `exited` on the state as well as logging it.
 
 Types: `ConstrainedSpawn`, `GuardLog`, `ManagedProcess`, `ProcessState`, `ReaperState`,
 `SpawnedChild`.
@@ -210,7 +211,9 @@ The thread that started the process holds its `ChildProcess`, and that is the on
 restarts it. When no such thread is left, which is what a `harper dev` reload leaves behind, the
 death is reported and the next load of the component starts a replacement once Harper's lock is
 gone. Whichever route reports it, a death is reported once: a Harper whose `unref()` leaves the
-wrapper polling still emits `'exit'`, and both routes settle the same state.
+wrapper polling still emits `'exit'`, and both routes settle the same state. The reaper's own
+launch is joined the same way and gets the same supervision, described under
+[The reaper](#the-reaper).
 
 ### The sweep
 
@@ -267,9 +270,23 @@ is first-hand knowledge, but never one read from a file. It needs `rootPath` to 
 `hdb.pid` and the pids directory; without one, `bootstrap()` reports that the processes will
 outlive the node.
 
-The reaper is a singleton through its own PID lock, and its launch used to pin the targets
-into argv. That was a gap: when a second component's launch lost the lock and joined the
-running reaper, the second component's processes were never watched. Each launch therefore
+The reaper is a singleton through its own PID lock, so all but one thread join a running reaper
+rather than launching one, and a joined reaper carries the blind spot a joined process does: the
+wrapper's `'exit'` cannot fire once `unref()` has cleared its timer. A reaper could therefore die
+with nothing on the node noticing, which is the orphan the package exists to prevent, since an
+ungracefully killed node leaves its children to whatever reaper is still alive. So the joining
+thread runs the same unref'd liveness poll a joined process gets. A death it sees sets `exited`
+on the `ReaperState` as well as logging a warning, because the state is what a caller's status
+endpoint renders, and a status still reporting `started: true` with a pid for a reaper that died
+an hour ago is worse than one that says nothing. Every death warns whatever its cause: the
+launching thread can read a signal as someone stopping the reaper on purpose, a joining thread
+cannot tell that from a crash, and the children outlive the node either way. Nothing relaunches
+the reaper from a joining thread, for the reason a joined process is not respawned: the threads
+that joined it would all reach for its lock at once.
+
+The reaper's launch used to pin the targets into argv. That was a gap: when a second component's
+launch lost the lock and joined the running reaper, the second component's processes were never
+watched. Each launch therefore
 records every managed process in a `<name>.guard.json` descriptor beside its lock, written
 before the reaper spawn so a launch that merely joins still leaves its record, and the reaper
 enumerates the descriptors at reap time instead of trusting argv alone. The argv targets stay

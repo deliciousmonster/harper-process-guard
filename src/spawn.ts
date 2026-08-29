@@ -150,27 +150,37 @@ export function assertConstrainedSpawn(
 	return { intercepted: false, detail: 'spawn of a bogus command was permitted' };
 }
 
+/** What a joined death is reported as. The mechanism around it is the same for a process and for a reaper. */
+interface AdoptedReport {
+	/** Logged when the join hands over no pid, so there is nothing to poll. */
+	readonly unsupervisable: string;
+	/** One line for a death: what is gone, how that was learned, and what follows from it. */
+	readonly gone: (pid: number, cause: string) => string;
+	/** One level for every death; without it the cause grades one, so a clean exit is info and a crash is error. */
+	readonly deathLevel?: 'info' | 'warn' | 'error' | undefined;
+}
+
 /**
  * Watch a process this thread joined rather than started. Harper's released wrappers implement
  * unref() as clearInterval on their liveness poll, so their 'exit' cannot fire once unref runs.
  */
 function superviseAdopted(
 	child: SpawnedChild,
-	state: ProcessState,
-	title: string,
+	/** Written, never read: both ProcessState and ReaperState carry `exited` for a status surface to show. */
+	state: { exited?: boolean | undefined },
 	log: GuardLog,
-	pollMs: number
+	pollMs: number,
+	report: AdoptedReport
 ): void {
-	const pid = child.pid;
-	if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+	const joined = child.pid;
+	if (typeof joined !== 'number' || !Number.isInteger(joined) || joined <= 0) {
 		// Harper hands the wrapper the pid from the lock file, so this is a Harper that read a lock it could not parse.
-		log.warn(
-			`process guard: the ${title} was joined without a pid, so this thread cannot tell whether ` +
-				`it is still running. Its death will go unreported here.`
-		);
+		log.warn(report.unsupervisable);
 		child.unref();
 		return;
 	}
+	// Declared a number rather than left as the narrowed union, which the closures below do not inherit.
+	const pid: number = joined;
 
 	let settled = false;
 	// One death however it reaches here: a Harper whose unref() leaves the wrapper polling still emits 'exit'.
@@ -179,13 +189,7 @@ function superviseAdopted(
 		settled = true;
 		clearInterval(poll);
 		state.exited = true;
-		log[level](
-			`process guard: the ${title} this thread joined (pid ${pid}) is gone (${cause}). This ` +
-				`thread never held its PID lock, so it is not restarting it: every thread that joined ` +
-				`one process would race the others. The thread that started it restarts it; when none ` +
-				`is left on this node, the next load of the component starts a replacement once ` +
-				`Harper's lock is gone.`
-		);
+		log[report.deathLevel ?? level](report.gone(pid, cause));
 	}
 
 	// Started before the listener and the unref below, so neither can reach `poll` before it exists.
@@ -290,7 +294,17 @@ export function startProcess(
 			`process guard: the ${title} is already running on this node (pid ${child.pid}); ` +
 				`this thread joined it instead of starting a second one.`
 		);
-		superviseAdopted(child, state, title, log, adoptedPollMs);
+		superviseAdopted(child, state, log, adoptedPollMs, {
+			unsupervisable:
+				`process guard: the ${title} was joined without a pid, so this thread cannot tell whether ` +
+				`it is still running. Its death will go unreported here.`,
+			gone: (pid, cause) =>
+				`process guard: the ${title} this thread joined (pid ${pid}) is gone (${cause}). This ` +
+				`thread never held its PID lock, so it is not restarting it: every thread that joined ` +
+				`one process would race the others. The thread that started it restarts it; when none ` +
+				`is left on this node, the next load of the component starts a replacement once ` +
+				`Harper's lock is gone.`,
+		});
 		return state;
 	}
 
@@ -355,6 +369,8 @@ export interface ReaperState {
 	/** True when this thread lost the reaper's own PID-file race and joined the winner's. */
 	adopted?: boolean;
 	pid?: number | undefined;
+	/** True once this thread has seen the reaper end, so a status surface holding this state stops reading healthy. */
+	exited?: boolean | undefined;
 	command?: string;
 	error?: string;
 }
@@ -377,6 +393,7 @@ export function launchReaper(
 		restartGraceMs = 8000,
 		startedHint,
 		outliveHint,
+		adoptedPollMs = ADOPTED_POLL_MS,
 	}: {
 		/** Absolute path of this package's dist/reaper.js, resolved by the caller through the package. */
 		reaperScript: string;
@@ -394,6 +411,8 @@ export function launchReaper(
 		startedHint?: string | undefined;
 		/** Appended wherever a missing or dead reaper means the processes outlive the node. */
 		outliveHint?: string | undefined;
+		/** How often a joined reaper is checked for liveness. */
+		adoptedPollMs?: number | undefined;
 	}
 ): ReaperState {
 	const state: ReaperState = {
@@ -504,8 +523,22 @@ export function launchReaper(
 			`process guard: the ${name} is already running on this node (pid ${child.pid}); this ` +
 				`thread joined it instead of starting a second one.`
 		);
-		// The wrapper polls on a setInterval it never unref'd; unref is what clears it.
-		child.unref();
+		// Every death warns whatever its cause: a joining thread cannot tell a deliberate stop from a
+		// crash, and the processes outlive this node either way.
+		superviseAdopted(child, state, log, adoptedPollMs, {
+			deathLevel: 'warn',
+			unsupervisable:
+				`process guard: the ${name} was joined without a pid, so this thread cannot tell whether ` +
+				`it is still running. Its death, and the processes then outliving this node, go unreported here.` +
+				(outliveHint ? ` ${outliveHint}` : ''),
+			gone: (pid, cause) =>
+				`process guard: the ${name} this thread joined (pid ${pid}) is gone (${cause}). The ` +
+				`processes it watched will now outlive this node; \`harper stop\` leaves them running. This ` +
+				`thread never held the reaper's PID lock, so it is not launching a replacement: every thread ` +
+				`that joined this reaper would race the others. The next load of the component launches one ` +
+				`once Harper's lock is gone.` +
+				(outliveHint ? ` ${outliveHint}` : ''),
+		});
 		return state;
 	}
 
@@ -515,6 +548,7 @@ export function launchReaper(
 	);
 	// A crashed reaper must say so in the log of the node it watched; a signal or code 0 is someone stopping it.
 	child.on('exit', (code, signal) => {
+		state.exited = true;
 		if (signal || code === 0) return;
 		log.warn(
 			`process guard: the ${name} exited with code ${code}. The processes it watched will ` +

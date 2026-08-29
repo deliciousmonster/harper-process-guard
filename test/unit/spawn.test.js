@@ -333,7 +333,8 @@ test('a lost reaper race: adopted, the joined log, unref, and no started line', 
 	withTempDir('orch-reaper-adopt-', (dir) => {
 		const script = path.join(dir, 'reaper.js');
 		fs.writeFileSync(script, '// stub');
-		const child = adoptedChild(555);
+		// A pid that is certainly alive, so the supervision poll below has nothing to report.
+		const child = adoptedChild(process.pid);
 		const log = recordingLog();
 		const state = launchReaper(() => child, {
 			reaperScript: script,
@@ -352,6 +353,8 @@ test('a lost reaper race: adopted, the joined log, unref, and no started line', 
 			'adoption must log as a join'
 		);
 		assert.ok(!log.lines.info.some((line) => /reaper started/.test(line)), 'a join was logged as a start');
+		assert.ok(!state.exited, 'a joined reaper that is running must not read as exited');
+		assert.equal(log.lines.warn.length + log.lines.error.length, 0, 'joining a live reaper is not a fault');
 	}));
 
 test("the reaper is spawned detached and unref-d, so a signal to this node's group misses it", () =>
@@ -480,7 +483,7 @@ test('a lost reaper race still leaves the descriptors, which is how the joined r
 	withTempDir('orch-descriptors-adopt-', (dir) => {
 		const script = path.join(dir, 'reaper.js');
 		fs.writeFileSync(script, '// stub');
-		const state = launchReaper(() => adoptedChild(555), {
+		const state = launchReaper(() => adoptedChild(process.pid), {
 			reaperScript: script,
 			rootPath: dir,
 			processes: [{ name: 'exporter', started: true, pid: 22, binaryPath: '/bin/exporter', title: 'exporter' }],
@@ -496,4 +499,118 @@ test('a lost reaper race still leaves the descriptors, which is how the joined r
 			pid: 22,
 			binaryPath: '/bin/exporter',
 		});
+	}));
+
+test("a joined reaper that dies is caught by the guard's own poll, reported once, and never relaunched", () =>
+	withTempDir('orch-reaper-joined-death-', async (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const live = liveProcess();
+		try {
+			const child = adoptedChild(live.pid);
+			const log = recordingLog();
+			let spawns = 0;
+			const spawn = () => {
+				spawns++;
+				return child;
+			};
+			const state = launchReaper(spawn, {
+				reaperScript: script,
+				rootPath: dir,
+				processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+				version: 7,
+				log,
+				adoptedPollMs: 20,
+				outliveHint: '127.0.0.1:8126 stays bound.',
+			});
+			assert.equal(state.adopted, true);
+			assert.ok(!state.exited);
+
+			// Harper's wrapper implements unref() as clearInterval on its own poll, so no 'exit' is
+			// coming: without this package's poll the reaper is gone and every thread still reads healthy.
+			process.kill(live.pid, 'SIGKILL');
+			await until(() => state.exited === true, 'the death of a joined reaper went unnoticed');
+			assert.equal(log.lines.warn.length, 1);
+			assert.match(log.lines.warn[0], /is gone \(a liveness poll found the pid dead\)/);
+			assert.match(log.lines.warn[0], /outlive this node/);
+			assert.ok(log.lines.warn[0].includes('127.0.0.1:8126 stays bound.'), 'the caller hint was dropped');
+
+			// Every thread joined the same reaper and would take the same lock at the same instant.
+			await new Promise((r) => setTimeout(r, 200));
+			assert.equal(spawns, 1, 'a joining thread relaunched a reaper it never held the lock for');
+			assert.equal(log.lines.warn.length, 1, 'the poll kept reporting a death it had already reported');
+		} finally {
+			try {
+				process.kill(live.pid, 'SIGKILL');
+			} catch {}
+		}
+	}));
+
+test('a Harper whose wrapper still emits exit reports the joined reaper death once, and the poll stands down', () =>
+	withTempDir('orch-reaper-joined-exit-', async (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		// process.pid never dies, so only the event can settle this one.
+		const child = adoptedChild(process.pid);
+		const log = recordingLog();
+		const state = launchReaper(() => child, {
+			reaperScript: script,
+			rootPath: dir,
+			processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+			version: 7,
+			log,
+			adoptedPollMs: 20,
+		});
+
+		// A stop signal on the launched path is read as someone stopping the reaper; a joining thread
+		// cannot tell that from a crash, and the processes outlive this node either way.
+		child.emit('exit', null, 'SIGKILL');
+		assert.equal(state.exited, true);
+		assert.equal(log.lines.warn.length, 1);
+		assert.match(log.lines.warn[0], /is gone \(signal SIGKILL\)/);
+
+		child.emit('exit', null, 'SIGKILL');
+		await new Promise((r) => setTimeout(r, 100));
+		assert.equal(log.lines.warn.length, 1, 'one death was reported twice');
+	}));
+
+test('a joined reaper with no pid is reported as unsupervisable rather than polled', () =>
+	withTempDir('orch-reaper-joined-nopid-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const child = adoptedChild();
+		// A default parameter would restore the pid, so it is cleared after construction.
+		child.pid = undefined;
+		const log = recordingLog();
+		const state = launchReaper(() => child, {
+			reaperScript: script,
+			rootPath: dir,
+			processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+			version: 7,
+			log,
+			adoptedPollMs: 20,
+		});
+		assert.equal(state.adopted, true);
+		assert.equal(child.unrefed, true);
+		// isAlive() reads a non-integer as dead, so polling one would report a death that never happened.
+		assert.match(log.lines.warn[0] ?? '', /joined without a pid/);
+		assert.ok(!state.exited);
+	}));
+
+test('a launched reaper that dies records it on the state, not only in the log', () =>
+	withTempDir('orch-reaper-exited-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const child = wonChild(559);
+		const state = launchReaper(() => child, {
+			reaperScript: script,
+			rootPath: dir,
+			processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+			version: 7,
+			log: recordingLog(),
+		});
+		assert.ok(!state.exited);
+		// `exited` means the same on both paths, so a status endpoint reads one field either way.
+		child.emit('exit', null, 'SIGKILL');
+		assert.equal(state.exited, true);
 	}));
