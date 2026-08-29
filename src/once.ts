@@ -145,11 +145,7 @@ export async function oncePerProcess<T>(
 			const marker = readMarker(path);
 			if (marker && isSameProcess(marker, me) && marker.done) return { ran: false, waited: true };
 
-			// Above the branch dispatch, so every arm is bounded. An earlier version checked it
-			// in two arms and not the third, and the third was the one that could never make
-			// progress: a marker in an unwritable directory turned the loop into open, EEXIST,
-			// failed unlink, repeat, with no yield. Measured at 99% CPU with the worker's event
-			// loop dead and its timers never firing.
+			// Above the branch dispatch so every arm is bounded: a marker in an unwritable directory must time out, not spin without yielding.
 			if (Date.now() >= deadline) return { ran: false, waited: false, reason: 'timed-out' };
 
 			if (marker && isSameProcess(marker, me)) {

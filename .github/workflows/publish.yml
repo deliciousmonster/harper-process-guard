@@ -33,13 +33,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The flag is load-bearing: three adversarial reviews found this module unsound while its suite was green, so shipping is refused until the checklist says otherwise.
+      # The flag is load-bearing: shipping is refused until the "Before it ships" checklist at the end of README.md is empty.
       - name: Refuse to publish while package.json says private
         run: |
           node -e '
             const manifest = JSON.parse(require("node:fs").readFileSync("package.json", "utf8"));
             if (manifest.private) {
-              console.log("::error::package.json still carries \"private\": true. The flag is deliberate; it comes off when the \"Before it moves out\" checklist at the end of README.md is empty, and not before. Empty the checklist, remove the flag, then re-tag.");
+              console.log("::error::package.json still carries \"private\": true. The flag is deliberate; it comes off when the \"Before it ships\" checklist at the end of README.md is empty, and not before. Empty the checklist, remove the flag, then re-tag.");
               process.exit(1);
             }
           '

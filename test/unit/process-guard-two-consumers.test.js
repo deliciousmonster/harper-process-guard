@@ -1,14 +1,13 @@
 /**
  * Two components sharing one Harper node, and therefore one pid directory.
  *
- * Every other suite here exercises a single caller, which is the configuration the module was
- * written against and the one that cannot reveal this class of bug. The marker key is derived
- * per caller precisely so a second component does not read the first one's completed marker as
- * its own and skip its sweep entirely, and until this file existed that derivation had never
- * been exercised by an actual second caller.
+ * Every other suite here exercises a single caller, which is the configuration that cannot
+ * reveal this class of bug. The marker key is derived per caller precisely so a second
+ * component does not read the first one's completed marker as its own and skip its sweep
+ * entirely, and only an actual second caller exercises that derivation.
  *
- * The scenario is not hypothetical for the package this lives in: a Harper node running the
- * Datadog component alongside anything else that spawns a child gets exactly this layout.
+ * The scenario is ordinary: a Harper node running two components that each spawn a child
+ * gets exactly this layout.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';

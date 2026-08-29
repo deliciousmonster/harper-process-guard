@@ -139,11 +139,7 @@ test("'removed-unidentifiable' is not reachable through an unresolved binary any
 		await settle(foreign.pid);
 		const pidDir = path.join(dir, 'pids');
 		writeLock(pidDir, 'agent', foreign.pid);
-		// This used to be the route to 'unknown', and it was a defect: an empty path meant
-		// nothing could be identified, so every live lock was deleted on the strength of a
-		// question never asked. It is now refused earlier, and the only remaining route to
-		// 'unknown' is a platform that genuinely cannot see, which is Windows and therefore
-		// not reachable from this suite.
+		// An empty path must be refused, not read as unidentifiable: that reading deletes every live lock on a question never asked.
 		const actions = await sweepStaleLocks({ pidDir, targets: target('') });
 		assert.equal(actions[0].action, 'skipped-unresolved');
 		assert.notEqual(actions[0].action, 'removed-unidentifiable');
@@ -198,11 +194,9 @@ test('every action renders a line naming the pid, and the safe ones say what was
 });
 
 /**
- * The four defects an adversarial review found and measured, each with the case that proved it.
- *
- * They are grouped here rather than scattered because they share a cause: the sweep decided
- * "orphan" from liveness and identity alone, and neither of those distinguishes a process this
- * node is about to inherit from one nobody owns.
+ * Four ways a sweep comes to read "orphan" wrongly, grouped because they share a cause:
+ * liveness and identity alone cannot distinguish a process this node is about to inherit
+ * from one nobody owns.
  */
 
 test('REGRESSION: a live agent whose lock still carries this configuration is kept, not killed', async () => {

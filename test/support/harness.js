@@ -1,17 +1,4 @@
-/**
- * Shared preamble for the hermetic suites under test/unit and test/e2e.
- *
- * Each of them locates the repo, imports something out of the built dist/, or
- * assembles a throwaway copy of the package, and each had grown its own
- * spelling: three findRepoRoot() walks, five copies of the pathToFileURL
- * comment, seven mkdtemp calls with the /private/var explanation restated in
- * four of them. A fix to one copy stranded the rest.
- *
- * The integration suites cannot import this file: they are TypeScript, and
- * tsconfig.test.json compiles them with allowJs off, so an untyped .js import
- * fails the typecheck gate. What those two share lives in
- * test/integration/support/harness.ts instead.
- */
+// Shared preamble for the hermetic suites under test/unit and test/e2e: repo root, manifest, temp dirs, dist copies.
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';

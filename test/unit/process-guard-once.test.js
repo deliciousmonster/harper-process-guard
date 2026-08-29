@@ -8,8 +8,8 @@
  * of them share `process.pid` and `process.uptime()`.
  *
  * The property under test is not "one thread ran it". It is "no thread returned before the
- * work finished", which is the one an earlier design satisfied for the winner and violated
- * for the other seven, letting them race ahead into the state the work was still repairing.
+ * work finished": a barrier that releases the losers early protects only the winner, and the
+ * other seven race ahead into the state the work is still repairing.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -70,8 +70,7 @@ test('NO thread returns before the work has finished', () =>
 		const results = await race(dir, { workMs: 400 });
 		const finishedAt = Number(fs.readFileSync(path.join(dir, 'work-finished-at'), 'utf-8'));
 
-		// The property an earlier design broke: seven threads returned immediately and went on
-		// to spawn against the state the winner was still repairing.
+		// Losers released early would spawn against the state the winner is still repairing.
 		for (const [index, result] of results.entries()) {
 			assert.ok(
 				result.returnedAt >= finishedAt,

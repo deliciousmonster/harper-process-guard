@@ -226,11 +226,8 @@ test('a descriptor that cannot be read is dropped rather than guessed at', () =>
 });
 
 /**
- * Ported from test/e2e/reaper-lifetime.test.js, which covered the reaper this replaced.
- *
- * Kept rather than dropped because each of these is a defect someone found the hard way: a
- * reaper that fires while the node is alive, one that accepts a dead pid as a replacement, and
- * one that reads a containerised Harper as already gone.
+ * The liveness misreadings a reaper must not make: firing while the node is alive, accepting
+ * a dead pid as a replacement, and reading a containerised Harper as already gone.
  */
 
 test('NEGATIVE: nothing is stopped while the watched process is still alive', async () => {
@@ -325,9 +322,7 @@ test('a lock naming a process that is already gone is not an error', async () =>
 });
 
 test('NEGATIVE: a Harper running as pid 1 is not read as dead', () => {
-	// A containerised Harper IS pid 1. An earlier reaper rejected `pid <= 1` as a guard against
-	// kill(2) process-GROUP selectors, which reads 1 as invalid and reaps a live node's agents
-	// on sight. Only 0 and negatives are selectors; 1 is an ordinary pid.
+	// A containerised Harper IS pid 1; only 0 and negatives are kill(2) group selectors, so a `pid <= 1` guard reaps a containerised node on sight.
 	assert.equal(isAlive(1), true, 'pid 1 was read as dead, which reaps a containerised node on sight');
 	assert.equal(isAlive(0), false, '0 is the caller process group');
 	assert.equal(isAlive(-1), false, 'a negative is group -n');

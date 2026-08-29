@@ -12,8 +12,8 @@
  *
  * SPAWNED, NEVER IMPORTED. A component runs it as
  * `node <package>/dist/reaper.js --...`. That is why it lives in the
- * package rather than being copied into each component: a copy per component drifts, and the
- * copy that drifted here reaped on liveness alone. It reaches its siblings by relative path,
+ * package rather than being copied into each component: a copy per component drifts, and a
+ * drifted copy reaps on liveness alone. It reaches its siblings by relative path,
  * which works because it is spawned from inside dist/; a bare specifier would not resolve from
  * a detached script.
  *
