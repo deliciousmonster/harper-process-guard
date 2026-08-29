@@ -2,6 +2,7 @@
 // adoption wrapper distinguishable only by missing spawnargs): all cheap to stub, impossible to produce on demand from a real Harper.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn as spawnProcess } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -45,6 +46,22 @@ function adoptedChild(pid = 4321) {
 
 const PROC = (binaryPath) => ({ name: 'agent', title: 'test agent', binaryPath, args: ['run'] });
 
+/** A real process to stand in for the one a thread joins; the guard polls its pid, so it has to exist. */
+function liveProcess() {
+	const child = spawnProcess(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore' });
+	child.unref();
+	return child;
+}
+
+/** Polls `check` true within ~5s; failing beats proceeding on a premise that never held. */
+async function until(check, message) {
+	for (let i = 0; i < 500; i++) {
+		if (check()) return;
+		await new Promise((r) => setTimeout(r, 10));
+	}
+	assert.fail(message);
+}
+
 test('fingerprint is a number inside 2^31, stable, and moved by any input', () => {
 	const a = fingerprint('cfg', 'key');
 	assert.equal(typeof a, 'number');
@@ -74,10 +91,86 @@ test('a winning spawn: started, not adopted, and the error listener is attached 
 });
 
 test('a lost race: adopted, unref called so the wrapper interval cannot pin the event loop', () => {
-	const child = adoptedChild(999);
-	const state = startProcess(() => child, PROC(process.execPath), { version: 1, log: recordingLog() });
+	// A pid that is certainly alive, so the supervision poll below has nothing to report.
+	const child = adoptedChild(process.pid);
+	const log = recordingLog();
+	const state = startProcess(() => child, PROC(process.execPath), { version: 1, log, adoptedPollMs: 20 });
 	assert.equal(state.adopted, true);
 	assert.equal(child.unrefed, true, 'the wrapper polls on a never-unref-d interval; unref is what clears it');
+	assert.ok(!state.exited, 'a joined process that is running must not read as exited');
+	assert.equal(log.lines.warn.length + log.lines.error.length, 0, 'joining a live process is not a fault');
+});
+
+test("a joined process that dies is caught by the guard's own poll, reported once, and never respawned", async () => {
+	const live = liveProcess();
+	try {
+		const child = adoptedChild(live.pid);
+		const log = recordingLog();
+		let spawns = 0;
+		const spawn = () => {
+			spawns++;
+			return child;
+		};
+		const state = startProcess(spawn, PROC(process.execPath), { version: 1, log, adoptedPollMs: 20 });
+		assert.equal(state.adopted, true);
+		assert.ok(!state.exited);
+
+		// Harper's wrapper implements unref() as clearInterval on its own poll, so no 'exit' is
+		// coming: without this package's poll the death is invisible and the state stays healthy.
+		process.kill(live.pid, 'SIGKILL');
+		await until(() => state.exited === true, 'the death of a joined process went unnoticed');
+		assert.equal(log.lines.error.length, 1);
+		assert.match(log.lines.error[0], /is gone \(a liveness poll found the pid dead\)/);
+		assert.match(log.lines.error[0], /is not restarting it/);
+
+		// Several threads join one process, so a respawn here races every sibling's backoff.
+		await new Promise((r) => setTimeout(r, 200));
+		assert.equal(spawns, 1, 'a joining thread respawned a process it never held the lock for');
+		assert.equal(log.lines.error.length, 1, 'the poll kept reporting a death it had already reported');
+	} finally {
+		try {
+			process.kill(live.pid, 'SIGKILL');
+		} catch {}
+	}
+});
+
+test('a Harper whose wrapper still emits exit reports that death once, and the poll stands down', async () => {
+	// process.pid never dies, so only the event can settle this one.
+	const child = adoptedChild(process.pid);
+	const log = recordingLog();
+	const state = startProcess(() => child, PROC(process.execPath), { version: 1, log, adoptedPollMs: 20 });
+
+	child.emit('exit', 7, null);
+	assert.equal(state.exited, true);
+	assert.equal(log.lines.error.length, 1);
+	assert.match(log.lines.error[0], /is gone \(exit code 7\)/);
+
+	// A second delivery of the same death, which is what a re-emitting wrapper produces.
+	child.emit('exit', 7, null);
+	await new Promise((r) => setTimeout(r, 100));
+	assert.equal(log.lines.error.length, 1, 'one death was reported twice');
+});
+
+test('a joined process stopped on purpose warns rather than reading as a crash', () => {
+	const child = adoptedChild(process.pid);
+	const log = recordingLog();
+	startProcess(() => child, PROC(process.execPath), { version: 1, log, adoptedPollMs: 20 });
+	child.emit('exit', null, 'SIGTERM');
+	assert.equal(log.lines.error.length, 0, 'a shutdown is not a crash');
+	assert.match(log.lines.warn[0] ?? '', /signal SIGTERM/);
+});
+
+test('a joined process with no pid is reported as unsupervisable rather than polled', () => {
+	const child = adoptedChild();
+	// A default parameter would restore the pid, so it is cleared after construction.
+	child.pid = undefined;
+	const log = recordingLog();
+	const state = startProcess(() => child, PROC(process.execPath), { version: 1, log, adoptedPollMs: 20 });
+	assert.equal(state.adopted, true);
+	assert.equal(child.unrefed, true);
+	// isAlive() reads a non-integer as dead, so polling one would report a death that never happened.
+	assert.match(log.lines.warn[0] ?? '', /joined without a pid/);
+	assert.ok(!state.exited);
 });
 
 test('an allowlist refusal is reported with the exact path to allowlist', () => {
@@ -259,6 +352,32 @@ test('a lost reaper race: adopted, the joined log, unref, and no started line', 
 			'adoption must log as a join'
 		);
 		assert.ok(!log.lines.info.some((line) => /reaper started/.test(line)), 'a join was logged as a start');
+	}));
+
+test("the reaper is spawned detached and unref-d, so a signal to this node's group misses it", () =>
+	withTempDir('orch-reaper-detached-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const child = wonChild(779);
+		const options = [];
+		launchReaper(
+			(command, args, spawnOptions) => {
+				options.push(spawnOptions);
+				return child;
+			},
+			{
+				reaperScript: script,
+				rootPath: dir,
+				processes: [{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a' }],
+				version: 7,
+				log: recordingLog(),
+			}
+		);
+		// Without this the reaper shares Harper's process group: one group signal takes Harper,
+		// the agents and the reaper together, and the locks are left with nothing to clean them.
+		assert.equal(options[0].detached, true);
+		assert.deepEqual(options[0].stdio, ['ignore', 'ignore', 'ignore'], 'no stream may tie it to this node');
+		assert.equal(child.unrefed, true, 'the reaper must not hold this node open');
 	}));
 
 test('a reaper that dies non-zero warns; a clean exit or a signal stays silent', () =>

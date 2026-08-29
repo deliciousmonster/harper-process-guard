@@ -135,9 +135,10 @@ Types: `Identification`.
   because Harper `parseInt()`s it.
 - `preflightBinary(title, binaryPath)` throws for a binary Harper cannot start: a spaced path no
   allowlist entry can match, or a file that is not there.
-- `startProcess(spawn, descriptor, { version, log })` starts one process through Harper's lock,
-  detects adoption, and restarts it with backoff after a crash. Returns a `ProcessState` that
-  keeps describing what runs.
+- `startProcess(spawn, descriptor, { version, log, adoptedPollMs })` starts one process through
+  Harper's lock and restarts it with backoff after a crash. A thread that loses the lock joins
+  the running process instead, and watches it with a liveness poll of its own. Returns a
+  `ProcessState` that keeps describing what runs.
 - `launchReaper(spawn, options)` records each running process in a `<name>.guard.json`
   descriptor beside its lock, then starts the guard's reaper, or says in the returned
   `ReaperState` why it was not; never fatal, since without one the processes merely outlive the
@@ -185,6 +186,32 @@ mismatch Harper replaces the process instead. `fingerprintParts` is what feeds t
 replaces the process, an unchanged one is adopted, and `harper restart` depends on that adoption
 to hand running children to a replacement node.
 
+### Joining a running process
+
+A thread that spawns while the lock names a live process gets an `ExistingProcessWrapper` back
+rather than a `ChildProcess`, and the wrapper is distinguishable only by its missing
+`spawnargs`. It watches the pid on a one-second interval that nothing unrefs, which pins the
+event loop of every thread that joined, so the guard unrefs it. On released Harper versions
+`unref()` is implemented as `clearInterval` on that very timer, and once it is cleared the
+wrapper's `'exit'` can never fire: kill a joined process and no thread notices, while the status
+the component reports still says it is running. Measured in a container, where only an
+external delivery probe caught it.
+
+So the guard runs its own poll instead of relying on the wrapper's. It is `unref`'d, so it never
+holds a node open, and it reads `isAlive()`, which counts a zombie as dead. That matters here
+because nothing `wait()`s a joined process: when the thread that started it is gone, the corpse
+keeps answering `kill(pid, 0)` indefinitely.
+
+A joining thread reports the death rather than restarting the process. Every thread on the node
+joins the same process and would see the same death within the same second, each with its own
+attempt counter and its own backoff timer started at the same instant, so one death would
+produce a burst of simultaneous spawns against a lock that is the only thing arbitrating them.
+The thread that started the process holds its `ChildProcess`, and that is the one whose backoff
+restarts it. When no such thread is left, which is what a `harper dev` reload leaves behind, the
+death is reported and the next load of the component starts a replacement once Harper's lock is
+gone. Whichever route reports it, a death is reported once: a Harper whose `unref()` leaves the
+wrapper polling still emits `'exit'`, and both routes settle the same state.
+
 ### The sweep
 
 Harper validates a lock by liveness alone: `process.kill(pid, 0)` says something holds the
@@ -225,8 +252,13 @@ process can reuse the same small pid. Identity comes from the OS, or from Harper
 ### The reaper
 
 Nothing inside a Harper node survives the node's death: there is no worker shutdown hook, and
-SIGKILL fires no handler. So the guard spawns a small detached process instead of registering
-one. It polls the node's pid, and when the pid goes away it waits a grace period for a
+SIGKILL fires no handler. So the guard spawns a small process instead of registering one, with
+`detached: true`, which puts it in a process group of its own. That is not decoration. A signal
+sent to the node's process group, which is what GNU `timeout` does when its deadline expires,
+otherwise takes the reaper down alongside everything it exists to outlive, and the locks are
+left behind with nothing running to clean them. Nothing else ties the reaper to the node that
+launched it either: its stdio is ignored, and the launcher unrefs it so it cannot hold that node
+open. It polls the node's pid, and when the pid goes away it waits a grace period for a
 replacement to write `hdb.pid`, because `harper restart` forks a new main and the children
 should be kept for it to adopt. Only then does it stop them: lock removed first so no worker
 adopts a dying pid, SIGTERM, SIGKILL after a grace. Its signal rule is deliberately weaker than

@@ -6,7 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 
-import { importDist, makeTempDir, withTempDir } from '../support/harness.js';
+import { pathToFileURL } from 'node:url';
+
+import { REPO_ROOT, importDist, makeTempDir, withTempDir } from '../support/harness.js';
 
 const { collectTargets, parseArgs, reapTarget, run } = await importDist('reaper.js');
 const { isAlive, identificationCanAuthoriseSignal } = await importDist('identity.js');
@@ -451,4 +453,73 @@ test('NEGATIVE: a Harper running as pid 1 is not read as dead', () => {
 	assert.equal(isAlive(1), true, 'pid 1 was read as dead, which reaps a containerised node on sight');
 	assert.equal(isAlive(0), false, '0 is the caller process group');
 	assert.equal(isAlive(-1), false, 'a negative is group -n');
+});
+
+// A stand-in for a Harper node: it launches a reaper through this package and then stays up.
+// Its own group is the thing under test, so it runs as a separate process, not a helper here.
+const LAUNCHER = `import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+import { launchReaper } from ${JSON.stringify(pathToFileURL(path.join(REPO_ROOT, 'dist', 'spawn.js')).href)};
+
+const [dir, script, watched, outFile, logFile] = process.argv.slice(2);
+const state = launchReaper((command, args, options) => spawn(command, args, options), {
+	reaperScript: script,
+	rootPath: dir,
+	processes: [{ name: 'agent', started: true, pid: Number(watched), binaryPath: process.execPath }],
+	log: { info() {}, warn() {}, error() {} },
+	logFile,
+	restartGraceMs: 60000,
+});
+writeFileSync(outFile, JSON.stringify(state));
+setInterval(() => {}, 1 << 30);
+`;
+
+test('CRITICAL: the reaper outlives a signal sent to the group of the node that launched it', async () => {
+	const dir = makeTempDir('reap-group-');
+	const agent = spawnOwn();
+	let launcherPid = null;
+	let reaperPid = null;
+	try {
+		await settle(agent.pid);
+		const launcherFile = path.join(dir, 'launcher.mjs');
+		const outFile = path.join(dir, 'reaper-state.json');
+		const errFile = path.join(dir, 'launcher.err');
+		const logFile = path.join(dir, 'reaper.log');
+		fs.writeFileSync(launcherFile, LAUNCHER);
+
+		// detached, so the launcher leads its own group and the group signal below cannot reach this runner.
+		const launcher = spawn(
+			process.execPath,
+			[launcherFile, dir, path.join(REPO_ROOT, 'dist', 'reaper.js'), String(agent.pid), outFile, logFile],
+			{ detached: true, stdio: ['ignore', 'ignore', fs.openSync(errFile, 'a')] }
+		);
+		launcher.unref();
+		launcherPid = launcher.pid;
+
+		for (let i = 0; i < 500 && !fs.existsSync(outFile); i++) await new Promise((r) => setTimeout(r, 10));
+		assert.ok(fs.existsSync(outFile), `the launcher never reported a reaper: ${fs.readFileSync(errFile, 'utf-8')}`);
+		const state = JSON.parse(fs.readFileSync(outFile, 'utf-8'));
+		assert.equal(state.started, true);
+		reaperPid = state.pid;
+
+		// Running its own loop, not merely spawned: otherwise surviving proves nothing about the reaper.
+		await until(
+			() => fs.existsSync(logFile) && fs.readFileSync(logFile, 'utf-8').includes('watching pid'),
+			'the reaper never reached its watch loop'
+		);
+
+		// What GNU `timeout` sends. Undetached, this took the reaper down alongside the node it
+		// was meant to outlive, and the locks were left with nothing running to clean them.
+		process.kill(-launcherPid, 'SIGKILL');
+		await until(() => !isAlive(launcherPid), 'the launcher survived a SIGKILL to its own group');
+		await new Promise((r) => setTimeout(r, 300));
+		assert.equal(isAlive(reaperPid), true, 'the reaper shared the launcher group and died with it');
+	} finally {
+		for (const p of [reaperPid, launcherPid, agent.pid]) {
+			try {
+				if (p) process.kill(p, 'SIGKILL');
+			} catch {}
+		}
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });

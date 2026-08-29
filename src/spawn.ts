@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { errorMessage } from './errors.js';
+import { isAlive } from './identity.js';
 import { writeGuardDescriptor } from './registry.js';
 
 /** The caller's logger. Nothing here writes to a console nobody reads. */
@@ -17,7 +18,14 @@ export interface GuardLog {
 export type ConstrainedSpawn = (
 	command: string,
 	args: string[],
-	options: { name: string; version?: number | undefined; stdio: ['ignore', 'ignore', 'ignore']; env: NodeJS.ProcessEnv }
+	options: {
+		name: string;
+		version?: number | undefined;
+		/** Passed through to child_process.spawn: its own process group, so a signal to this node's group misses it. */
+		detached?: boolean | undefined;
+		stdio: ['ignore', 'ignore', 'ignore'];
+		env: NodeJS.ProcessEnv;
+	}
 ) => SpawnedChild;
 
 /** What Harper's spawn returns: a real ChildProcess, or an ExistingProcessWrapper for losers. */
@@ -61,6 +69,9 @@ export interface ProcessState {
 const RESPAWN_MAX_ATTEMPTS = 5;
 const RESPAWN_BASE_MS = 1000;
 const RESPAWN_CAP_MS = 30_000;
+// Liveness cadence for a joined process. Not sub-second: isAlive() runs a `ps` per call on darwin,
+// once per joined process per thread, and this only has to report a death rather than react to one.
+const ADOPTED_POLL_MS = 2000;
 
 /** Fingerprint of what forces replacement of a running process; a NUMBER inside 2^31, because Harper parseInt()s it. */
 export function fingerprint(...parts: unknown[]): number {
@@ -139,11 +150,78 @@ export function assertConstrainedSpawn(
 	return { intercepted: false, detail: 'spawn of a bogus command was permitted' };
 }
 
+/**
+ * Watch a process this thread joined rather than started. Harper's released wrappers implement
+ * unref() as clearInterval on their liveness poll, so their 'exit' cannot fire once unref runs.
+ */
+function superviseAdopted(
+	child: SpawnedChild,
+	state: ProcessState,
+	title: string,
+	log: GuardLog,
+	pollMs: number
+): void {
+	const pid = child.pid;
+	if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) {
+		// Harper hands the wrapper the pid from the lock file, so this is a Harper that read a lock it could not parse.
+		log.warn(
+			`process guard: the ${title} was joined without a pid, so this thread cannot tell whether ` +
+				`it is still running. Its death will go unreported here.`
+		);
+		child.unref();
+		return;
+	}
+
+	let settled = false;
+	// One death however it reaches here: a Harper whose unref() leaves the wrapper polling still emits 'exit'.
+	function settle(level: 'info' | 'warn' | 'error', cause: string): void {
+		if (settled) return;
+		settled = true;
+		clearInterval(poll);
+		state.exited = true;
+		log[level](
+			`process guard: the ${title} this thread joined (pid ${pid}) is gone (${cause}). This ` +
+				`thread never held its PID lock, so it is not restarting it: every thread that joined ` +
+				`one process would race the others. The thread that started it restarts it; when none ` +
+				`is left on this node, the next load of the component starts a replacement once ` +
+				`Harper's lock is gone.`
+		);
+	}
+
+	// Started before the listener and the unref below, so neither can reach `poll` before it exists.
+	const poll = setInterval(() => {
+		if (!isAlive(pid)) settle('error', 'a liveness poll found the pid dead');
+	}, pollMs);
+	// A node shutting down must not wait on supervision; outliving the node is the reaper's job.
+	poll.unref?.();
+
+	child.on('exit', (code, signal) => {
+		if (signal) {
+			settle(signal === 'SIGTERM' || signal === 'SIGINT' || signal === 'SIGHUP' ? 'warn' : 'error', `signal ${signal}`);
+			return;
+		}
+		settle(code === 0 ? 'info' : 'error', `exit code ${code}`);
+	});
+	// The wrapper polls on a setInterval it never unref'd; unref is what clears it, which is why the poll above exists.
+	child.unref();
+}
+
 /** Start one process through Harper's lock and keep it started; synchronous because Harper's spawn is. */
 export function startProcess(
 	spawn: ConstrainedSpawn,
 	descriptor: ManagedProcess,
-	{ version, log, logDirHint }: { version?: number | undefined; log: GuardLog; logDirHint?: string | undefined },
+	{
+		version,
+		log,
+		logDirHint,
+		adoptedPollMs = ADOPTED_POLL_MS,
+	}: {
+		version?: number | undefined;
+		log: GuardLog;
+		logDirHint?: string | undefined;
+		/** How often a joined process is checked for liveness. */
+		adoptedPollMs?: number | undefined;
+	},
 	existingState: ProcessState | null = null,
 	attempt = 0
 ): ProcessState {
@@ -212,8 +290,7 @@ export function startProcess(
 			`process guard: the ${title} is already running on this node (pid ${child.pid}); ` +
 				`this thread joined it instead of starting a second one.`
 		);
-		// The wrapper polls on a setInterval it never unref'd; unref is what clears it.
-		child.unref();
+		superviseAdopted(child, state, title, log, adoptedPollMs);
 		return state;
 	}
 
@@ -237,7 +314,7 @@ export function startProcess(
 				`(attempt ${attempt + 1} of ${RESPAWN_MAX_ATTEMPTS}).`
 		);
 		const timer = setTimeout(() => {
-			startProcess(spawn, descriptor, { version, log, logDirHint }, state, attempt + 1);
+			startProcess(spawn, descriptor, { version, log, logDirHint, adoptedPollMs }, state, attempt + 1);
 		}, delay);
 		// A node shutting down must not wait on a restart; outliving the node is the reaper's job, not a timer's.
 		timer.unref?.();
@@ -392,6 +469,9 @@ export function launchReaper(
 			child = spawn(command, args, {
 				name,
 				version,
+				// Its own process group. A signal sent to this node's group (GNU `timeout` sends one)
+				// otherwise takes the reaper down alongside everything it exists to outlive.
+				detached: true,
 				stdio: ['ignore', 'ignore', 'ignore'],
 				env: process.env,
 			});
@@ -442,5 +522,8 @@ export function launchReaper(
 				(outliveHint ? ` ${outliveHint}` : '')
 		);
 	});
+	// Detached and unref'd: the reaper must outlive this node, so nothing about it may hold the
+	// node open. stdio is already ignored, so no stream ties it back either.
+	child.unref();
 	return state;
 }
