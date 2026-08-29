@@ -13,7 +13,7 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { importDist, makeTempDir, withTempDir } from '../support/harness.js';
+import { importDist, withTempDir } from '../support/harness.js';
 
 const { assertConstrainedSpawn, fingerprint, launchReaper, preflightBinary, startProcess } =
 	await importDist('spawn.js');

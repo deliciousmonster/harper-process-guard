@@ -14,7 +14,7 @@ import path from 'node:path';
 import { Worker } from 'node:worker_threads';
 import { pathToFileURL } from 'node:url';
 
-import { REPO_ROOT, importDist, makeTempDir, withTempDir } from '../support/harness.js';
+import { REPO_ROOT, importDist, withTempDir } from '../support/harness.js';
 
 const { bootstrap } = await importDist('index.js');
 const { currentProcess } = await importDist('once.js');
