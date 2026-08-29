@@ -21,8 +21,8 @@ import {
 export { currentProcess, oncePerProcess, type OnceOutcome, type ProcessIdentity } from './once.js';
 export { describeSweep, sweepStaleLocks, type SweepAction, type SweepTarget } from './sweep.js';
 export { executableOf, identify, isAlive, readLock, type Identification } from './identity.js';
-export { readHarperRootPath } from './harper.js';
-export { pollEndpoint } from './poll.js';
+export { readHarperRootPath } from './harper-root.js';
+export { pollEndpoint } from './poll-endpoint.js';
 // The constrained spawn comes FROM THE CALLER; Harper substitutes it per module graph and this package loads natively.
 export {
 	assertConstrainedSpawn,
