@@ -10,6 +10,7 @@ import { importDist, makeTempDir, withTempDir } from '../support/harness.js';
 
 const { sweepStaleLocks, describeSweep, removeIfStill } = await importDist('sweep.js');
 const { isAlive, identify, readLock, identificationCanAuthoriseSignal } = await importDist('identity.js');
+const { writeGuardDescriptor, guardDescriptorPath } = await importDist('registry.js');
 
 /** A live child running THIS node binary, so it identifies as `process.execPath`. */
 function spawnOwnBinary() {
@@ -347,3 +348,43 @@ test(
 		}
 	}
 );
+
+test('the reaper descriptor travels with its lock: kept while the lock stands, removed when the lock goes', () =>
+	withTempDir('sweep-descriptor-', async (dir) => {
+		const pidDir = path.join(dir, 'pids');
+		writeLock(pidDir, 'agent', DEAD_PID);
+		writeGuardDescriptor(pidDir, {
+			name: 'agent',
+			pidFile: path.join(pidDir, 'agent.pid'),
+			pid: DEAD_PID,
+			binaryPath: '/nonexistent/agent',
+		});
+		const descriptor = guardDescriptorPath(pidDir, 'agent');
+
+		// An unresolved binary leaves the lock untouched, so the descriptor must stand with it.
+		let actions = await sweepStaleLocks({ pidDir, targets: target('') });
+		assert.equal(actions[0].action, 'skipped-unresolved');
+		assert.equal(fs.existsSync(descriptor), true, 'a lock the sweep left alone lost its descriptor');
+
+		// The dead lock goes, and a descriptor left behind would hand the reaper a pid the
+		// sweep already adjudicated as nothing.
+		actions = await sweepStaleLocks({ pidDir, targets: target('/nonexistent/agent') });
+		assert.equal(actions[0].action, 'removed-dead');
+		assert.equal(fs.existsSync(descriptor), false, 'the stale descriptor survived its lock');
+	}));
+
+test('a descriptor whose lock is already gone is cleared by the sweep', () =>
+	withTempDir('sweep-descriptor-orphaned-', async (dir) => {
+		const pidDir = path.join(dir, 'pids');
+		fs.mkdirSync(pidDir, { recursive: true });
+		// A clean exit: Harper removed the lock, and the descriptor is the only record left.
+		writeGuardDescriptor(pidDir, {
+			name: 'agent',
+			pidFile: path.join(pidDir, 'agent.pid'),
+			pid: DEAD_PID,
+			binaryPath: '/nonexistent/agent',
+		});
+		const actions = await sweepStaleLocks({ pidDir, targets: target('/nonexistent/agent') });
+		assert.deepEqual(actions, [], 'an absent lock is the ordinary case, not an action');
+		assert.equal(fs.existsSync(guardDescriptorPath(pidDir, 'agent')), false);
+	}));

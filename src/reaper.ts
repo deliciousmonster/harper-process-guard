@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 
 import { errorMessage } from './errors.js';
 import { identificationCanAuthoriseSignal, identify, isAlive } from './identity.js';
+import { guardDescriptorPathForLock, readGuardDescriptors } from './registry.js';
 
 /** How often the watched process is checked. */
 const POLL_INTERVAL_MS = 1000;
@@ -26,6 +27,8 @@ export interface ReaperOptions {
 	/** The process to watch. When it goes, the targets are stopped. */
 	harperPid: number;
 	targets: ReapTarget[];
+	/** Where the locks and `.guard.json` descriptors live. When given, descriptors are enumerated at reap time, so processes recorded by a caller that merely JOINED this reaper are covered too. */
+	pidDir?: string;
 	/** Where a replacement writes its pid: `harper restart` forks a new main, so the children are KEPT for it to adopt, and reaping waits for one first. */
 	hdbPidFile?: string;
 	/** How long to wait for that replacement. */
@@ -89,7 +92,7 @@ function targetsFor(options: ReaperOptions, target: ReapTarget, recorded: number
 	});
 }
 
-/** The lock is removed BEFORE signalling: a worker that reads a dying pid adopts a corpse and never retries; one that finds nothing spawns a replacement. */
+/** The lock is removed BEFORE signalling: a worker that reads a dying pid adopts a corpse and never retries; one that finds nothing spawns a replacement. The descriptor goes with the lock, however this ends. */
 export async function reapTarget(options: ReaperOptions, target: ReapTarget): Promise<void> {
 	const recorded = readPidFile(target.pidFile);
 	removeQuietly(target.pidFile);
@@ -97,6 +100,7 @@ export async function reapTarget(options: ReaperOptions, target: ReapTarget): Pr
 	const targets = targetsFor(options, target, recorded);
 	if (targets.length === 0) {
 		log(options, `${target.pidFile}: nothing to stop`);
+		removeQuietly(guardDescriptorPathForLock(target.pidFile));
 		return;
 	}
 
@@ -121,6 +125,23 @@ export async function reapTarget(options: ReaperOptions, target: ReapTarget): Pr
 			log(options, `could not SIGKILL ${pid}: ${errorMessage(error)}`);
 		}
 	}
+	removeQuietly(guardDescriptorPathForLock(target.pidFile));
+}
+
+/** Argv seeds the list; the descriptors under pidDir are read on top, and win per lock as the later record. Argv alone is the pre-descriptor behaviour, kept so an old caller's flags still reap. */
+export function collectTargets(options: ReaperOptions): ReapTarget[] {
+	const byLock = new Map<string, ReapTarget>();
+	for (const target of options.targets) byLock.set(target.pidFile, target);
+	if (options.pidDir) {
+		for (const descriptor of readGuardDescriptors(options.pidDir)) {
+			byLock.set(descriptor.pidFile, {
+				pidFile: descriptor.pidFile,
+				pid: descriptor.pid,
+				binaryPath: descriptor.binaryPath,
+			});
+		}
+	}
+	return [...byLock.values()];
 }
 
 /** The pid of a replacement node, or null. Never the process this was watching. */
@@ -133,9 +154,14 @@ function replacementPid(options: ReaperOptions): number | null {
 
 /** Exported so a test can drive it without spawning a process; the module tail runs it when executed directly. */
 export async function run(options: ReaperOptions): Promise<void> {
+	// The census is deferred to reap time on purpose: a caller that joins this reaper later
+	// leaves its descriptors under pidDir, and counting now would miss them.
+	const watching = options.pidDir
+		? `the processes recorded under ${options.pidDir} (${options.targets.length} named at launch)`
+		: `${options.targets.length} process(es)`;
 	log(
 		options,
-		`watching pid ${options.harperPid}; will stop ${options.targets.length} process(es) when it goes. ` +
+		`watching pid ${options.harperPid}; will stop ${watching} when it goes. ` +
 			`Restart grace ${options.restartGraceMs}ms.`
 	);
 
@@ -155,7 +181,7 @@ export async function run(options: ReaperOptions): Promise<void> {
 		await delay(100);
 	}
 
-	for (const target of options.targets) await reapTarget(options, target);
+	for (const target of collectTargets(options)) await reapTarget(options, target);
 	removeQuietly(options.selfPidFile);
 	log(options, 'done.');
 }
@@ -175,6 +201,10 @@ export function parseArgs(argv: string[]): ReaperOptions {
 				break;
 			case '--hdb-pid-file':
 				options.hdbPidFile = value;
+				i++;
+				break;
+			case '--pid-dir':
+				options.pidDir = value;
 				i++;
 				break;
 			case '--restart-grace-ms':

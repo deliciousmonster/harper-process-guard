@@ -322,3 +322,59 @@ test('caller hints reach the messages the genericization stripped', () =>
 		});
 		assert.ok(missingLog.lines.error[0].includes('127.0.0.1:8126 stays bound.'), 'the hint missed the report');
 	}));
+
+test('the reaper launch records each running process in a descriptor and names the pid dir on the command line', () =>
+	withTempDir('orch-descriptors-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const calls = [];
+		launchReaper(
+			(command, args) => {
+				calls.push(args);
+				return wonChild(777);
+			},
+			{
+				reaperScript: script,
+				rootPath: dir,
+				processes: [
+					{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a', title: 'a' },
+					{ name: 'b', started: false, title: 'b', binaryPath: '/bin/b' },
+				],
+				version: 7,
+				log: recordingLog(),
+			}
+		);
+		const pidDir = path.join(dir, 'pids');
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(pidDir, 'a.guard.json'), 'utf-8')), {
+			name: 'a',
+			pidFile: path.join(pidDir, 'a.pid'),
+			pid: 11,
+			binaryPath: '/bin/a',
+		});
+		assert.equal(fs.existsSync(path.join(pidDir, 'b.guard.json')), false, 'an unstarted process was recorded');
+		const flagAt = calls[0].indexOf('--pid-dir');
+		assert.notEqual(flagAt, -1, 'the reaper was not told where the descriptors live');
+		assert.equal(calls[0][flagAt + 1], pidDir);
+	}));
+
+test('a lost reaper race still leaves the descriptors, which is how the joined reaper learns of them', () =>
+	withTempDir('orch-descriptors-adopt-', (dir) => {
+		const script = path.join(dir, 'reaper.js');
+		fs.writeFileSync(script, '// stub');
+		const state = launchReaper(() => adoptedChild(555), {
+			reaperScript: script,
+			rootPath: dir,
+			processes: [{ name: 'exporter', started: true, pid: 22, binaryPath: '/bin/exporter', title: 'exporter' }],
+			version: 7,
+			log: recordingLog(),
+		});
+		assert.equal(state.adopted, true);
+		// This is the pinned gap: the loser's argv never reaches the running reaper, so the
+		// descriptor on disk is the only route by which its process gets stopped.
+		assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, 'pids', 'exporter.guard.json'), 'utf-8')), {
+			name: 'exporter',
+			pidFile: path.join(dir, 'pids', 'exporter.pid'),
+			pid: 22,
+			binaryPath: '/bin/exporter',
+		});
+	}));

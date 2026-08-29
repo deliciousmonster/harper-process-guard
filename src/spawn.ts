@@ -4,6 +4,7 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { errorMessage } from './errors.js';
+import { writeGuardDescriptor } from './registry.js';
 
 /** The caller's logger. Nothing here writes to a console nobody reads. */
 export interface GuardLog {
@@ -323,11 +324,30 @@ export function launchReaper(
 		started: false,
 	};
 
-	const running = processes.filter((p) => p.started && typeof p.pid === 'number');
+	const running = processes.filter((p): p is ProcessState & { pid: number } => p.started && typeof p.pid === 'number');
 	if (running.length === 0) {
 		state.error = 'no process started, so there is nothing to stop';
 		return state;
 	}
+
+	// Recorded BEFORE the launch, and regardless of how it ends: when this thread loses the
+	// reaper's lock and joins an existing one, these files are how that reaper learns of its processes.
+	for (const p of running) {
+		try {
+			writeGuardDescriptor(pidDir, {
+				name: p.name,
+				pidFile: join(pidDir, `${p.name}.pid`),
+				pid: p.pid,
+				binaryPath: p.binaryPath ?? '',
+			});
+		} catch (error) {
+			log.warn(
+				`process guard: could not record the ${p.title ?? p.name} for the reaper ` +
+					`(${errorMessage(error)}); a reaper launched by another caller will not know to stop it.`
+			);
+		}
+	}
+
 	if (!existsSync(reaperScript)) {
 		state.error = `${reaperScript} is missing`;
 		log.error(
@@ -350,6 +370,10 @@ export function launchReaper(
 		String(restartGraceMs),
 		'--self-pid-file',
 		join(pidDir, `${name}.pid`),
+		// The reaper re-enumerates this directory's descriptors at reap time; an older reaper
+		// binary ignores the flag and reaps from the argv targets below, as before.
+		'--pid-dir',
+		pidDir,
 		...(logFile ? ['--log', logFile] : []),
 		// Base64 JSON per target: the fields are absolute paths, which a colon-split spelling breaks.
 		...running.flatMap((p) => [

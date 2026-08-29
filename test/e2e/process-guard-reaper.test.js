@@ -8,8 +8,9 @@ import { spawn } from 'node:child_process';
 
 import { importDist, makeTempDir, withTempDir } from '../support/harness.js';
 
-const { parseArgs, reapTarget, run } = await importDist('reaper.js');
+const { collectTargets, parseArgs, reapTarget, run } = await importDist('reaper.js');
 const { isAlive, identificationCanAuthoriseSignal } = await importDist('identity.js');
+const { writeGuardDescriptor, guardDescriptorPath } = await importDist('registry.js');
 
 /** A live child running this node binary, so it is identifiable as process.execPath. */
 function spawnOwn() {
@@ -18,13 +19,23 @@ function spawnOwn() {
 	return child;
 }
 
-/** A live child that ignores SIGTERM, for the escalation path. */
-function spawnStubborn() {
-	const child = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1 << 30)"], {
-		stdio: 'ignore',
-	});
+/** A live child that ignores SIGTERM, for the escalation path; touches `readyFile` once the handler holds. */
+function spawnStubborn(readyFile) {
+	const script =
+		"process.on('SIGTERM', () => {}); require('node:fs').writeFileSync(process.argv[1], ''); " +
+		'setInterval(() => {}, 1 << 30)';
+	const child = spawn(process.execPath, ['-e', script, readyFile], { stdio: 'ignore' });
 	child.unref();
 	return child;
+}
+
+/** Polls `check` true within ~5s; failing beats proceeding on a premise that never held. */
+async function until(check, message) {
+	for (let i = 0; i < 500; i++) {
+		if (check()) return;
+		await new Promise((r) => setTimeout(r, 10));
+	}
+	assert.fail(message);
 }
 
 function spawnForeign() {
@@ -46,11 +57,13 @@ test('an identified child is stopped and its lock removed', async () => {
 		await settle(child.pid);
 		const pidFile = path.join(dir, 'agent.pid');
 		fs.writeFileSync(pidFile, `${child.pid}\n1`);
+		writeGuardDescriptor(dir, { name: 'agent', pidFile, pid: child.pid, binaryPath: process.execPath });
 		await reapTarget(opts(), { pidFile, pid: child.pid, binaryPath: process.execPath });
 		assert.equal(isAlive(child.pid), false, 'the child outlived its reaping');
 		// Removed BEFORE the signal: a file naming a dying process is worse than no file,
 		// because a worker that reads it adopts a corpse and never retries.
 		assert.equal(fs.existsSync(pidFile), false);
+		assert.equal(fs.existsSync(guardDescriptorPath(dir, 'agent')), false, 'the descriptor must go with the lock');
 	} finally {
 		try {
 			process.kill(child.pid, 'SIGKILL');
@@ -112,14 +125,18 @@ test('NEGATIVE: where the platform can identify, a mismatch is refused even for 
 
 test('a child that ignores SIGTERM is escalated to SIGKILL', async () => {
 	const dir = makeTempDir('reap-stubborn-');
-	const child = spawnStubborn();
+	const readyFile = path.join(dir, 'stubborn-ready');
+	const child = spawnStubborn(readyFile);
 	try {
-		await settle(child.pid);
+		// Not merely alive: the SIGTERM handler must hold first, or a still-booting child dies
+		// to the SIGTERM and the escalation goes untested whenever that race lands wrong.
+		await until(() => fs.existsSync(readyFile), 'the stubborn child never installed its handler');
 		const pidFile = path.join(dir, 'agent.pid');
 		fs.writeFileSync(pidFile, `${child.pid}\n1`);
 		await reapTarget(opts(), { pidFile, pid: child.pid, binaryPath: process.execPath });
-		// Escalation is confined to processes identified above, which is what makes it defensible.
-		assert.equal(isAlive(child.pid), false);
+		// Polled, not asserted flat: SIGKILL delivery is asynchronous, and the held handler
+		// means only the escalation can be the cause of death.
+		await until(() => !isAlive(child.pid), 'the SIGKILL escalation did not land');
 	} finally {
 		try {
 			process.kill(child.pid, 'SIGKILL');
@@ -140,6 +157,7 @@ test('a replacement inside the grace window keeps the children for it to adopt',
 		const pidFile = path.join(dir, 'agent.pid');
 		const hdbPidFile = path.join(dir, 'hdb.pid');
 		fs.writeFileSync(pidFile, `${child.pid}\n1`);
+		writeGuardDescriptor(dir, { name: 'agent', pidFile, pid: child.pid, binaryPath: process.execPath });
 		// `harper restart` forks a replacement and exits the old main. Stopping the children
 		// there would drop whatever they were carrying, on every restart.
 		fs.writeFileSync(hdbPidFile, String(replacement.pid));
@@ -147,6 +165,7 @@ test('a replacement inside the grace window keeps the children for it to adopt',
 		const done = run({
 			harperPid: watched.pid,
 			targets: [{ pidFile, pid: child.pid, binaryPath: process.execPath }],
+			pidDir: dir,
 			hdbPidFile,
 			restartGraceMs: 3000,
 		});
@@ -155,6 +174,11 @@ test('a replacement inside the grace window keeps the children for it to adopt',
 
 		assert.equal(isAlive(child.pid), true, 'the child was reaped despite a replacement taking over');
 		assert.equal(fs.existsSync(pidFile), true, 'and its lock must survive for the adoption');
+		assert.equal(
+			fs.existsSync(guardDescriptorPath(dir, 'agent')),
+			true,
+			"and so must its descriptor, or the replacement's reaper starts blind"
+		);
 	} finally {
 		for (const p of [watched.pid, child.pid, replacement.pid]) {
 			try {
@@ -195,6 +219,86 @@ test('no replacement inside the window means the children are stopped', async ()
 	}
 });
 
+test('CRITICAL: a caller that joined the reaper gets its processes reaped through descriptors, beside the argv set', async () => {
+	const dir = makeTempDir('reap-joined-');
+	const watched = spawnOwn();
+	const first = spawnOwn();
+	const second = spawnOwn();
+	try {
+		await settle(watched.pid);
+		await settle(first.pid);
+		await settle(second.pid);
+		const firstLock = path.join(dir, 'first.pid');
+		const secondLock = path.join(dir, 'second.pid');
+		fs.writeFileSync(firstLock, `${first.pid}\n1`);
+		fs.writeFileSync(secondLock, `${second.pid}\n1`);
+		// The winner's launch seeds argv with ITS processes only. The second caller lost the
+		// reaper's PID lock and joined, so its process exists solely as a descriptor on disk.
+		writeGuardDescriptor(dir, { name: 'first', pidFile: firstLock, pid: first.pid, binaryPath: process.execPath });
+		writeGuardDescriptor(dir, { name: 'second', pidFile: secondLock, pid: second.pid, binaryPath: process.execPath });
+
+		const done = run({
+			harperPid: watched.pid,
+			targets: [{ pidFile: firstLock, pid: first.pid, binaryPath: process.execPath }],
+			pidDir: dir,
+			restartGraceMs: 50,
+		});
+		process.kill(watched.pid, 'SIGKILL');
+		await done;
+
+		assert.equal(isAlive(first.pid), false, "the argv caller's process outlived the reaping");
+		assert.equal(
+			isAlive(second.pid),
+			false,
+			"the joined caller's process outlived the reaping: argv was trusted alone"
+		);
+		for (const [name, lock] of [
+			['first', firstLock],
+			['second', secondLock],
+		]) {
+			assert.equal(fs.existsSync(lock), false, `${name}.pid survived`);
+			assert.equal(fs.existsSync(guardDescriptorPath(dir, name)), false, `${name}'s descriptor survived`);
+		}
+	} finally {
+		for (const p of [watched.pid, first.pid, second.pid]) {
+			try {
+				process.kill(p, 'SIGKILL');
+			} catch {}
+		}
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test('a zombie answers kill(pid, 0) yet reads as dead, so a corpse is neither adopted nor waited on', async () => {
+	// sh backgrounds a short sleep and execs a long one over itself; the short one's exit then
+	// has no wait()er, which is the definition of a zombie.
+	const parent = spawn('sh', ['-c', 'sleep 0.2 & echo $!; exec sleep 600'], {
+		stdio: ['ignore', 'pipe', 'ignore'],
+	});
+	try {
+		const zombiePid = Number.parseInt(
+			await new Promise((resolve, reject) => {
+				let out = '';
+				parent.stdout.on('data', (chunk) => {
+					out += chunk;
+					if (out.includes('\n')) resolve(out);
+				});
+				parent.on('error', reject);
+			}),
+			10
+		);
+		assert.ok(Number.isInteger(zombiePid) && zombiePid > 0, `sh reported no background pid`);
+		await until(() => !isAlive(zombiePid), 'the zombie kept reading as alive');
+		// The blind spot this closes: the pid is still held (its parent never reaped it), so the
+		// bare kill(pid, 0) probe says yes while nothing runs behind it.
+		assert.doesNotThrow(() => process.kill(zombiePid, 0), 'not a zombie: the pid was fully released');
+	} finally {
+		try {
+			process.kill(parent.pid, 'SIGKILL');
+		} catch {}
+	}
+});
+
 test('the target descriptor survives paths containing a colon', () =>
 	withTempDir('reap-args-', (dir) => {
 		// The previous spelling was `pidFile:pid` split on the last colon, which any path
@@ -213,6 +317,33 @@ test('a descriptor that cannot be read is dropped rather than guessed at', () =>
 	const parsed = parseArgs(['--harper-pid', '7', '--target', 'not-base64-json', '--target', '']);
 	assert.deepEqual(parsed.targets, [], 'a target it cannot read names nothing it may act on');
 });
+
+test('--pid-dir reaches the options, and an argv-only invocation still parses without one', () => {
+	const parsed = parseArgs(['--harper-pid', '7', '--pid-dir', '/some/pids']);
+	assert.equal(parsed.pidDir, '/some/pids');
+	// The pre-descriptor command line, which an updated reaper must go on serving.
+	assert.equal(parseArgs(['--harper-pid', '7']).pidDir, undefined);
+});
+
+test('targets are collected from descriptors on top of argv, and from argv alone without a pid dir', () =>
+	withTempDir('reap-collect-', (dir) => {
+		const argvTarget = { pidFile: path.join(dir, 'a.pid'), pid: 10, binaryPath: '/bin/a' };
+		// The same lock in argv and on disk: the descriptor wins, being the later record.
+		writeGuardDescriptor(dir, { name: 'a', pidFile: argvTarget.pidFile, pid: 11, binaryPath: '/bin/a2' });
+		writeGuardDescriptor(dir, { name: 'b', pidFile: path.join(dir, 'b.pid'), pid: 20, binaryPath: '/bin/b' });
+		fs.writeFileSync(path.join(dir, 'c.guard.json'), 'torn{', 'utf-8');
+
+		const merged = collectTargets({ harperPid: 1, targets: [argvTarget], restartGraceMs: 50, pidDir: dir });
+		assert.deepEqual(
+			merged.toSorted((x, y) => x.pidFile.localeCompare(y.pidFile)),
+			[
+				{ pidFile: argvTarget.pidFile, pid: 11, binaryPath: '/bin/a2' },
+				{ pidFile: path.join(dir, 'b.pid'), pid: 20, binaryPath: '/bin/b' },
+			]
+		);
+		// No pidDir is the old launch spelling; the argv seed must keep working verbatim.
+		assert.deepEqual(collectTargets({ harperPid: 1, targets: [argvTarget], restartGraceMs: 50 }), [argvTarget]);
+	}));
 
 // Liveness misreadings the reaper must not make: firing while the node lives, accepting a dead
 // pid as a replacement, reading a containerised Harper as gone.
@@ -290,16 +421,23 @@ test('a lock naming a process that is already gone is not an error', async () =>
 		await settle(watched.pid);
 		const pidFile = path.join(dir, 'agent.pid');
 		fs.writeFileSync(pidFile, '2147483646\n1');
+		writeGuardDescriptor(dir, { name: 'agent', pidFile, pid: 2147483646, binaryPath: process.execPath });
 
 		const done = run({
 			harperPid: watched.pid,
 			targets: [{ pidFile, pid: 2147483646, binaryPath: process.execPath }],
+			pidDir: dir,
 			restartGraceMs: 50,
 		});
 		process.kill(watched.pid, 'SIGKILL');
 		await done;
 
 		assert.equal(fs.existsSync(pidFile), false, 'the stale lock was left for the next start to adopt');
+		assert.equal(
+			fs.existsSync(guardDescriptorPath(dir, 'agent')),
+			false,
+			'nothing-to-stop must still clear the descriptor'
+		);
 	} finally {
 		try {
 			process.kill(watched.pid, 'SIGKILL');

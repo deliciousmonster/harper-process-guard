@@ -6,17 +6,48 @@ import { basename, isAbsolute, join } from 'node:path';
 
 import { errnoCode } from './errors.js';
 
-/** True if some process holds this pid. EPERM counts: it exists, owned by another user. */
+/** The state field of /proc/<pid>/stat, or null. comm is parenthesised and may itself contain spaces and parens, so the state is the token after the LAST ')'. */
+export function parseProcStatState(stat: string): string | null {
+	const commEnd = stat.lastIndexOf(')');
+	if (commEnd === -1) return null;
+	const [state] = stat
+		.slice(commEnd + 1)
+		.trim()
+		.split(/\s+/, 1);
+	return state || null;
+}
+
+/** A zombie still holds its pid but runs nothing and never will again; kill(pid, 0) cannot see that. */
+function isZombie(pid: number): boolean {
+	try {
+		if (process.platform === 'linux') {
+			return parseProcStatState(readFileSync(`/proc/${pid}/stat`, 'utf-8')) === 'Z';
+		}
+		if (process.platform === 'darwin') {
+			const state = execFileSync('ps', ['-p', String(pid), '-o', 'state='], {
+				encoding: 'utf-8',
+				timeout: 2000,
+				stdio: ['ignore', 'pipe', 'ignore'],
+			}).trim();
+			return state.startsWith('Z');
+		}
+	} catch {
+		// An unreadable state says nothing; liveness was already answered by kill(pid, 0).
+	}
+	return false;
+}
+
+/** True if some process holds this pid AND still runs: a dead-but-unreaped zombie answers kill(pid, 0), and reading it as alive adopts a corpse. EPERM counts: it exists, owned by another user. */
 export function isAlive(pid: number): boolean {
 	// Non-positive values are process-GROUP selectors to kill(2), not pids: 0 is the caller's
 	// own group and a negative is group -n. Asking about either answers a different question.
 	if (!Number.isInteger(pid) || pid <= 0) return false;
 	try {
 		process.kill(pid, 0);
-		return true;
 	} catch (error) {
-		return errnoCode(error) === 'EPERM';
+		if (errnoCode(error) !== 'EPERM') return false;
 	}
+	return !isZombie(pid);
 }
 
 /** Executable behind a pid: absolute on Linux, as-invoked (possibly bare) on macOS; null means "cannot tell", never "not ours". */

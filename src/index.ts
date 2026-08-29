@@ -41,6 +41,7 @@ export {
 } from './spawn.js';
 // The reaper is SPAWNED, not called; these exports exist so its behaviour can be tested without spawning one.
 export {
+	collectTargets as collectReapTargets,
 	parseArgs as parseReaperArgs,
 	reapTarget,
 	run as runReaper,

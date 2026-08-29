@@ -6,6 +6,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 import { errnoCode } from './errors.js';
 import { identificationCanAuthoriseSignal, identify, isAlive, readLock } from './identity.js';
+import { guardDescriptorPath } from './registry.js';
 
 /** How long an identified orphan gets to exit after SIGTERM before it is reported as staying. */
 const STOP_TIMEOUT_MS = 5000;
@@ -51,6 +52,9 @@ export async function sweepStaleLocks({
 
 	for (const target of targets) {
 		const lockPath = join(pidDir, `${target.name}.pid`);
+		// The reaper's descriptor travels with the lock: wherever the lock is removed as stale,
+		// the record beside it is stale for the same reason.
+		const descriptorPath = guardDescriptorPath(pidDir, target.name);
 
 		// An empty path means resolution failed: judged against it, every live process reads
 		// unidentifiable and every lock is removed on a question never asked.
@@ -64,13 +68,15 @@ export async function sweepStaleLocks({
 		if (!lock) {
 			// Absent is the ordinary case. An unparseable file is removed so Harper's own
 			// stale-file handling never has to guess at it.
-			removeIfStill(lockPath, null);
+			if (removeIfStill(lockPath, null)) removeQuietly(descriptorPath);
 			continue;
 		}
 
 		if (!isAlive(lock.pid)) {
-			if (removeIfStill(lockPath, lock.pid)) actions.push({ ...entry(target, lock.pid), action: 'removed-dead' });
-			else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
+			if (removeIfStill(lockPath, lock.pid)) {
+				removeQuietly(descriptorPath);
+				actions.push({ ...entry(target, lock.pid), action: 'removed-dead' });
+			} else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
 			continue;
 		}
 
@@ -79,17 +85,20 @@ export async function sweepStaleLocks({
 		if (identification === 'differs') {
 			// Live, and demonstrably something else. The lock is ours to remove; the process
 			// is not ours to touch.
-			if (removeIfStill(lockPath, lock.pid)) actions.push({ ...entry(target, lock.pid), action: 'removed-foreign' });
-			else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
+			if (removeIfStill(lockPath, lock.pid)) {
+				removeQuietly(descriptorPath);
+				actions.push({ ...entry(target, lock.pid), action: 'removed-foreign' });
+			} else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
 			continue;
 		}
 
 		if (identification === 'unknown') {
 			// Unidentifiable: remove the lock (left, it would be adopted) but signal nothing; a
 			// real orphan still holds its port, which the caller's liveness check reports.
-			if (removeIfStill(lockPath, lock.pid))
+			if (removeIfStill(lockPath, lock.pid)) {
+				removeQuietly(descriptorPath);
 				actions.push({ ...entry(target, lock.pid), action: 'removed-unidentifiable' });
-			else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
+			} else actions.push({ ...entry(target, lock.pid), action: 'skipped-changed' });
 			continue;
 		}
 
@@ -129,11 +138,20 @@ export async function sweepStaleLocks({
 		// No SIGKILL: a SIGTERM-ignoring process is reported, not forced; by now the pid may
 		// belong to something else.
 		const survived = isAlive(lock.pid);
-		removeIfStill(lockPath, lock.pid);
+		if (removeIfStill(lockPath, lock.pid)) removeQuietly(descriptorPath);
 		actions.push({ ...entry(target, lock.pid), action: survived ? 'orphan-survived' : 'stopped-orphan' });
 	}
 
 	return actions;
+}
+
+/** For the descriptor beside a lock; the lock itself goes through removeIfStill's re-read. */
+function removeQuietly(path: string): void {
+	try {
+		unlinkSync(path);
+	} catch {
+		// Absent is the outcome asked for.
+	}
 }
 
 function entry(target: SweepTarget, pid: number): { name: string; pid: number } {

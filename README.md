@@ -119,8 +119,9 @@ Types: `SweepAction`, `SweepTarget`.
   ever justify acting on a process, and `'unknown'` never reads as "not ours".
 - `executableOf(pid)` is the executable behind a pid: absolute on Linux, as-invoked on macOS,
   `null` for "cannot tell".
-- `isAlive(pid)` says whether some process holds the pid; EPERM counts, since the process
-  exists and is merely another user's.
+- `isAlive(pid)` says whether some process holds the pid and still runs: a zombie answers
+  `kill(pid, 0)` but reads as dead here, since it can be neither signalled nor adopted. EPERM
+  counts, since the process exists and is merely another user's.
 - `readLock(path)` parses Harper's PID lock into `{ pid, version }`, with Harper's own
   tolerance so the two never disagree, or `null`.
 
@@ -137,7 +138,8 @@ Types: `Identification`.
 - `startProcess(spawn, descriptor, { version, log })` starts one process through Harper's lock,
   detects adoption, and restarts it with backoff after a crash. Returns a `ProcessState` that
   keeps describing what runs.
-- `launchReaper(spawn, options)` starts the guard's reaper, or says in the returned
+- `launchReaper(spawn, options)` records each running process in a `<name>.guard.json`
+  descriptor beside its lock, then starts the guard's reaper, or says in the returned
   `ReaperState` why it was not; never fatal, since without one the processes merely outlive the
   node.
 
@@ -150,7 +152,9 @@ The reaper is spawned as `dist/reaper.js`, never called. These exist so its beha
 testable without spawning one:
 
 - `parseReaperArgs(argv)` parses the reaper's command line into `ReaperOptions`.
-- `reapTarget(options, target)` removes one target's lock, then stops the process.
+- `collectReapTargets(options)` merges the launch's argv targets with the `.guard.json`
+  descriptors under the pid directory, which is the set the reaper acts on.
+- `reapTarget(options, target)` removes one target's lock and descriptor, then stops the process.
 - `runReaper(options)` is the watch loop: wait out the node, honour the restart grace, reap.
 
 Types: `ReaperOptions`, `ReapTarget`.
@@ -230,6 +234,16 @@ the sweep's: where identification is unavailable it may signal the pid it watche
 is first-hand knowledge, but never one read from a file. It needs `rootPath` to locate
 `hdb.pid` and the pids directory; without one, `bootstrap()` reports that the processes will
 outlive the node.
+
+The reaper is a singleton through its own PID lock, and its launch used to pin the targets
+into argv. That was a gap: when a second component's launch lost the lock and joined the
+running reaper, the second component's processes were never watched. Each launch therefore
+records every managed process in a `<name>.guard.json` descriptor beside its lock, written
+before the reaper spawn so a launch that merely joins still leaves its record, and the reaper
+enumerates the descriptors at reap time instead of trusting argv alone. The argv targets stay
+as the seed, so an older reaper binary still reaps what it was launched with. Descriptors are
+removed with the locks they sit beside: the sweep takes one when it removes a stale lock, and
+the reaper once its target is handled.
 
 ### Verify
 
