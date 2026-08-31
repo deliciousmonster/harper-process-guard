@@ -44,7 +44,6 @@
 		"ci:local": "node scripts/ci-local.js",
 		"prepublishOnly": "npm run build"
 	},
-	"private": true,
 	"devDependencies": {
 		"@types/node": "^24.0.0",
 		"oxlint": "1.78.0",
