@@ -4,8 +4,9 @@ import { createHash } from 'node:crypto';
 import { join } from 'node:path';
 
 import { errorMessage } from './errors.js';
-import { isAlive } from './identity.js';
+import { isAlive, readLock } from './identity.js';
 import { writeGuardDescriptor } from './registry.js';
+import { removeIfStill } from './sweep.js';
 
 /** The caller's logger. Nothing here writes to a console nobody reads. */
 export interface GuardLog {
@@ -72,6 +73,11 @@ const RESPAWN_CAP_MS = 30_000;
 // Liveness cadence for a joined process. Not sub-second: isAlive() runs a `ps` per call on darwin,
 // once per joined process per thread, and this only has to report a death rather than react to one.
 const ADOPTED_POLL_MS = 2000;
+
+/** One schedule for both paths: a restart from a thread that only joined must not outrun the owner's. */
+function backoffMs(attempt: number): number {
+	return Math.min(RESPAWN_BASE_MS * 2 ** attempt, RESPAWN_CAP_MS);
+}
 
 /** Fingerprint of what forces replacement of a running process; a NUMBER inside 2^31, because Harper parseInt()s it. */
 export function fingerprint(...parts: unknown[]): number {
@@ -158,6 +164,8 @@ interface AdoptedReport {
 	readonly gone: (pid: number, cause: string) => string;
 	/** One level for every death; without it the cause grades one, so a clean exit is info and a crash is error. */
 	readonly deathLevel?: 'info' | 'warn' | 'error' | undefined;
+	/** Run for a death that grades as a crash. A stop delivered through the wrapper never reaches it. */
+	readonly onCrash?: ((pid: number, cause: string) => void) | undefined;
 }
 
 /**
@@ -190,6 +198,9 @@ function superviseAdopted(
 		clearInterval(poll);
 		state.exited = true;
 		log[report.deathLevel ?? level](report.gone(pid, cause));
+		// The grade carries the intent: code 0 and the stop signals are someone shutting it down.
+		// deathLevel changes how a death reads, never what it was, so the hook reads `level`.
+		if (level === 'error') report.onCrash?.(pid, cause);
 	}
 
 	// Started before the listener and the unref below, so neither can reach `poll` before it exists.
@@ -218,11 +229,14 @@ export function startProcess(
 		version,
 		log,
 		logDirHint,
+		pidDir,
 		adoptedPollMs = ADOPTED_POLL_MS,
 	}: {
 		version?: number | undefined;
 		log: GuardLog;
 		logDirHint?: string | undefined;
+		/** Where Harper's PID locks live. Without it a thread that joined cannot tell a death nobody owns from one another thread has already answered, and reports either. */
+		pidDir?: string | undefined;
 		/** How often a joined process is checked for liveness. */
 		adoptedPollMs?: number | undefined;
 	},
@@ -287,6 +301,70 @@ export function startProcess(
 		log.error(`process guard: the ${title} failed to execute: ${detail}`);
 	});
 
+	/** True once this thread may not restart again. The cap is spent per death seen, not per restart won, so threads that lost the lock deplete alongside the one that took it. */
+	function restartsExhausted(reason: string): boolean {
+		if (attempt + 1 <= RESPAWN_MAX_ATTEMPTS) return false;
+		log.error(
+			`process guard: the ${title} has died ${attempt} times (${reason}); not ` +
+				`restarting it again. What it provided is now missing until the component reloads.`
+		);
+		return true;
+	}
+
+	/** Arm the restart. Unref'd: a node shutting down must not wait on one, and must not be restarted into either. */
+	function armRestart(delay: number, gate?: () => boolean): void {
+		const timer = setTimeout(() => {
+			if (gate && !gate()) return;
+			startProcess(spawn, descriptor, { version, log, logDirHint, pidDir, adoptedPollMs }, state, attempt + 1);
+		}, delay);
+		timer.unref?.();
+	}
+
+	/** Answer a death this thread watched but never owned. Harper's spawn is the arbiter: its exclusive create hands the restart to one thread, and every other thread joins whatever that one starts. */
+	function reclaim(pid: number, cause: string): void {
+		if (!pidDir) {
+			log.warn(
+				`process guard: no pid directory was named, so this thread cannot tell whether anything ` +
+					`still owns the ${title} (pid ${pid}); not starting a replacement. Pass pidDir, or ` +
+					`rootPath to bootstrap(), and a death nobody owns is restarted rather than only reported.`
+			);
+			return;
+		}
+		const lockPath = join(pidDir, `${descriptor.name}.pid`);
+		// Harper removes the lock from the exit of the ChildProcess it handed out, so a lock outliving
+		// its process is the ownerless case: no thread here saw the exit, and nothing else will act on it.
+		if (!existsSync(lockPath)) {
+			log.info(
+				`process guard: the ${title} lock at ${lockPath} is already gone, so whichever thread ` +
+					`held it has answered this death; a thread that only joined is not starting a replacement.`
+			);
+			return;
+		}
+		if (restartsExhausted(cause)) return;
+		const delay = backoffMs(attempt);
+		log.warn(
+			`process guard: nothing on this node holds the ${title} lock at ${lockPath}, so its death ` +
+				`is nobody's to repair. Going back through Harper's spawn in ${delay}ms: this thread ` +
+				`restarts it if the lock is still stale by then, and joins it if another thread got ` +
+				`there first (attempt ${attempt + 1} of ${RESPAWN_MAX_ATTEMPTS}).`
+		);
+		armRestart(delay, () => {
+			// Existence, not contents: Harper's lock is empty between its exclusive create and its pid
+			// write, and a thread reading that gap as gone would abandon a process that is starting.
+			if (!existsSync(lockPath)) {
+				log.info(
+					`process guard: the ${title} lock went away while this thread waited to take it, so ` +
+						`another thread has answered the death; not starting a replacement.`
+				);
+				return false;
+			}
+			// Harper validates a lock with a bare kill(pid, 0), which a corpse answers, so its spawn
+			// would hand back the corpse. Removed only while the lock still names this dead pid.
+			if (readLock(lockPath)?.pid === pid && !isAlive(pid)) removeIfStill(lockPath, pid);
+			return true;
+		});
+	}
+
 	// The adoption wrapper lacks `spawnargs`; stdout is not a tell, since an ignored-stdio winner also has none.
 	state.adopted = !Array.isArray(child.spawnargs);
 	if (state.adopted) {
@@ -299,11 +377,9 @@ export function startProcess(
 				`process guard: the ${title} was joined without a pid, so this thread cannot tell whether ` +
 				`it is still running. Its death will go unreported here.`,
 			gone: (pid, cause) =>
-				`process guard: the ${title} this thread joined (pid ${pid}) is gone (${cause}). This ` +
-				`thread never held its PID lock, so it is not restarting it: every thread that joined ` +
-				`one process would race the others. The thread that started it restarts it; when none ` +
-				`is left on this node, the next load of the component starts a replacement once ` +
-				`Harper's lock is gone.`,
+				`process guard: the ${title} this thread joined (pid ${pid}) is gone (${cause}). What it ` +
+				`provided is missing from this node until something replaces it.`,
+			onCrash: reclaim,
 		});
 		return state;
 	}
@@ -313,25 +389,15 @@ export function startProcess(
 			`${descriptor.args.join(' ')}.${logDirHint ? ` It logs to ${logDirHint}.` : ''}`
 	);
 
-	/** Restart with backoff after a death nothing else recovers from; only the winning thread ever gets here. */
+	/** Restart with backoff after a death nothing else recovers from. This thread holds the lock, so no sibling is racing it here. */
 	function respawn(reason: string): void {
-		if (attempt + 1 > RESPAWN_MAX_ATTEMPTS) {
-			log.error(
-				`process guard: the ${title} has died ${attempt} times (${reason}); not ` +
-					`restarting it again. What it provided is now missing until the component reloads.`
-			);
-			return;
-		}
-		const delay = Math.min(RESPAWN_BASE_MS * 2 ** attempt, RESPAWN_CAP_MS);
+		if (restartsExhausted(reason)) return;
+		const delay = backoffMs(attempt);
 		log.warn(
 			`process guard: restarting the ${title} in ${delay}ms after ${reason} ` +
 				`(attempt ${attempt + 1} of ${RESPAWN_MAX_ATTEMPTS}).`
 		);
-		const timer = setTimeout(() => {
-			startProcess(spawn, descriptor, { version, log, logDirHint, adoptedPollMs }, state, attempt + 1);
-		}, delay);
-		// A node shutting down must not wait on a restart; outliving the node is the reaper's job, not a timer's.
-		timer.unref?.();
+		armRestart(delay);
 	}
 
 	child.on('exit', (code, signal) => {
@@ -533,10 +599,9 @@ export function launchReaper(
 				(outliveHint ? ` ${outliveHint}` : ''),
 			gone: (pid, cause) =>
 				`process guard: the ${name} this thread joined (pid ${pid}) is gone (${cause}). The ` +
-				`processes it watched will now outlive this node; \`harper stop\` leaves them running. This ` +
-				`thread never held the reaper's PID lock, so it is not launching a replacement: every thread ` +
-				`that joined this reaper would race the others. The next load of the component launches one ` +
-				`once Harper's lock is gone.` +
+				`processes it watched will now outlive this node; \`harper stop\` leaves them running. No ` +
+				`thread relaunches a reaper mid-node, the one that launched it included, so this is a ` +
+				`report: the next load of the component launches one once Harper's lock is gone.` +
 				(outliveHint ? ` ${outliveHint}` : ''),
 		});
 		return state;

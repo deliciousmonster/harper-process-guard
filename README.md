@@ -135,10 +135,11 @@ Types: `Identification`.
   because Harper `parseInt()`s it.
 - `preflightBinary(title, binaryPath)` throws for a binary Harper cannot start: a spaced path no
   allowlist entry can match, or a file that is not there.
-- `startProcess(spawn, descriptor, { version, log, adoptedPollMs })` starts one process through
-  Harper's lock and restarts it with backoff after a crash. A thread that loses the lock joins
-  the running process instead, and watches it with a liveness poll of its own. Returns a
-  `ProcessState` that keeps describing what runs.
+- `startProcess(spawn, descriptor, { version, log, pidDir, adoptedPollMs })` starts one process
+  through Harper's lock and restarts it with backoff after a crash. A thread that loses the lock
+  joins the running process instead, and watches it with a liveness poll of its own; given
+  `pidDir` it also answers a death no thread on the node owns, by going back through that lock.
+  Returns a `ProcessState` that keeps describing what runs.
 - `launchReaper(spawn, options)` records each running process in a `<name>.guard.json`
   descriptor beside its lock, then starts the guard's reaper, or says in the returned
   `ReaperState` why it was not; never fatal, since without one the processes merely outlive the
@@ -203,17 +204,51 @@ holds a node open, and it reads `isAlive()`, which counts a zombie as dead. That
 because nothing `wait()`s a joined process: when the thread that started it is gone, the corpse
 keeps answering `kill(pid, 0)` indefinitely.
 
-A joining thread reports the death rather than restarting the process. Every thread on the node
-joins the same process and would see the same death within the same second, each with its own
-attempt counter and its own backoff timer started at the same instant, so one death would
-produce a burst of simultaneous spawns against a lock that is the only thing arbitrating them.
-The thread that started the process holds its `ChildProcess`, and that is the one whose backoff
-restarts it. When no such thread is left, which is what a `harper dev` reload leaves behind, the
-death is reported and the next load of the component starts a replacement once Harper's lock is
-gone. Whichever route reports it, a death is reported once: a Harper whose `unref()` leaves the
-wrapper polling still emits `'exit'`, and both routes settle the same state. The reaper's own
-launch is joined the same way and gets the same supervision, described under
-[The reaper](#the-reaper).
+The restart stays with the thread that started the process, while there is one. That thread holds
+the `ChildProcess`, hears its exit immediately, and restarts it from its own backoff; a joining
+thread learns of the same death a poll interval later, so the two never race for it and nothing
+has to coordinate them.
+
+Ownerless is the state that reasoning missed, and it is the ordinary one after a node restarts
+while its sidecars survive: every thread of the new node joins through the lock, so a death is
+then seen by all of them and repaired by none. Live verification of the Harper port of this code
+found exactly that- a SIGKILLed adopted process stayed dead indefinitely, its stale lock intact,
+the component still reporting it as verified. So a joining thread now answers a death that grades
+as a crash by going back through Harper's spawn, after the same backoff the owner waits out.
+Harper's lock arbitrates, as it already must: `acquirePidFileLock` takes it with
+`openSync(path, 'wx')`, so one thread creates the file and starts the replacement while every
+other gets the adoption wrapper for what that one started and resumes watching it. One death, one
+restart, whatever the thread count.
+
+The attempt cap survives the thread count because it is spent per death seen rather than per
+restart won. Every thread watching the process sees the same death and spends one attempt on it,
+whether it took the lock or joined the winner's replacement, so the counters move in step and the
+node stops restarting after the fifth death rather than after the fifth times the thread count.
+The delay is the owner's schedule unchanged: 1s, doubling, capped at 30s.
+
+Reclaiming removes the stale lock first, and only while it still names the pid this thread watched
+die. Harper validates a lock with a bare `kill(pid, 0)`, which a dead-but-unreaped process answers,
+so a spawn against a corpse's lock hands back a wrapper for the corpse; a sidecar reparented to a
+non-reaping init is precisely the ownerless case, and it is where that matters.
+
+A deliberate stop still must not be fought, and a joining thread cannot see one directly: on
+released Harper the wrapper's `'exit'` is dead by the time the poll starts, so all it has is a pid
+that stopped answering. Three things do tell it. An exit status, when a Harper whose `unref()`
+leaves the wrapper polling delivers one: code 0, `SIGTERM`, `SIGINT` and `SIGHUP` read as a stop,
+graded exactly as the owner grades them, and nothing follows. The node's own shutdown: the restart
+rides an unref'd timer, so a node on its way out never fires it. And the lock, which Harper removes
+from the exit of the `ChildProcess` it handed out: a lock still standing over a dead pid means no
+thread here saw that exit, and a lock already gone means one did and has made its decision. What
+that leaves is an operator stopping a joined process by hand on a node where nothing owns it, which
+from in here is indistinguishable from a crash and gets replaced. Remove its lock first, or stop
+the component, and it stays stopped.
+
+Any of this needs the pid directory: `bootstrap()` passes what it derived from `pidDir` or
+`rootPath`, and a direct `startProcess` call takes `pidDir` itself. Without one a joining thread
+cannot tell an ownerless death from an answered one, so it reports the death and restarts nothing.
+Whichever route reports it, a death is reported once: a Harper whose `unref()` leaves the wrapper
+polling still emits `'exit'`, and both routes settle the same state. The reaper's own launch is
+joined the same way and gets the same supervision, described under [The reaper](#the-reaper).
 
 ### The sweep
 
@@ -281,8 +316,9 @@ endpoint renders, and a status still reporting `started: true` with a pid for a 
 an hour ago is worse than one that says nothing. Every death warns whatever its cause: the
 launching thread can read a signal as someone stopping the reaper on purpose, a joining thread
 cannot tell that from a crash, and the children outlive the node either way. Nothing relaunches
-the reaper from a joining thread, for the reason a joined process is not respawned: the threads
-that joined it would all reach for its lock at once.
+a reaper mid-node, the thread that launched it included, so a joining thread is not the special
+case here that it was for a joined process: the death is reported, and the next load of the
+component launches one once Harper's lock is gone.
 
 The reaper's launch used to pin the targets into argv. That was a gap: when a second component's
 launch lost the lock and joined the running reaper, the second component's processes were never

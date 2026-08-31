@@ -300,7 +300,7 @@ export async function bootstrap({
 				args: proc.args ?? [],
 				exitHint: proc.exitHint,
 			},
-			{ version: version ?? proc.version, log }
+			{ version: version ?? proc.version, log, pidDir: lockDir }
 		);
 		// The resolve error is the actionable one; startProcess only knows the path never arrived.
 		if (resolveError) state.error = resolveError;

@@ -1,5 +1,7 @@
 // The supervision matrix as one table: every death a guarded process or the reaper can reach, on the
 // thread that started it and on a thread that only joined it. Unreachable cells carry the reason.
+// What a joined thread does about a death is the other dimension, and it needs a lock to read:
+// ownerless-adoption.test.js drives it; the cells here pass no pid directory.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn as nodeSpawn } from 'node:child_process';
@@ -303,7 +305,8 @@ const PERMUTATIONS = [
 		supervisor: 'startProcess',
 		role: 'joiner',
 		death: 'the pid is released, and no wrapper event arrives',
-		expected: "the guard's own poll reports it once at error, and no thread that never held the lock respawns",
+		expected:
+			"the guard's own poll reports it once at error; with no pid directory to read, the thread cannot tell an ownerless death from an answered one and restarts nothing",
 		async run(w) {
 			const pid = w.live();
 			const child = adoptedChild(pid);
@@ -317,11 +320,11 @@ const PERMUTATIONS = [
 			await w.until(() => state.exited === true, 'the death of a joined process went unnoticed');
 			w.eq(w.lines.error.length, 1, 'one death, one report');
 			w.match(w.lines.error[0], /is gone \(a liveness poll found the pid dead\)/, 'the report must name the poll');
-			w.match(w.lines.error[0], /is not restarting it/, 'a joiner must leave the restart to the owner');
+			w.match(w.lines.warn.at(-1), /no pid directory was named/, 'a thread that cannot read the lock must say so');
 
-			// Several threads join one process, so a respawn here races every sibling's backoff.
+			// The lock is the only thing that separates a death nobody owns from one already answered.
 			await w.hold(200);
-			w.eq(w.spawns.count, 1, 'a joining thread respawned a process it never held the lock for');
+			w.eq(w.spawns.count, 1, 'a joining thread restarted a process without reading a lock');
 			w.eq(w.lines.error.length, 1, 'the poll kept reporting a death it had already reported');
 		},
 	},
