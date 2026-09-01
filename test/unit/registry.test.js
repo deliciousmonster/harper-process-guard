@@ -31,6 +31,31 @@ test('a written descriptor reads back verbatim, keyed beside its lock', () =>
 		assert.equal(guardDescriptorPath(pidDir, 'trace-agent'), path.join(pidDir, 'trace-agent.guard.json'));
 	}));
 
+test('the arguments round-trip, and a record written without them stays a record without them', () =>
+	withTempDir('registry-args-', (dir) => {
+		const pidFile = path.join(dir, 'agent.pid');
+		// `node <script>` is the shape a Harper sidecar has, and the script is what separates two of them.
+		writeGuardDescriptor(dir, { name: 'agent', pidFile, pid: 7, binaryPath: '/usr/bin/node', args: ['/opt/a/run.js'] });
+		assert.deepEqual(readGuardDescriptors(dir), [
+			{ name: 'agent', pidFile, pid: 7, binaryPath: '/usr/bin/node', args: ['/opt/a/run.js'] },
+		]);
+		// A descriptor from a launch before this field existed identifies by executable alone,
+		// which is what it always did; a half-readable vector is no vector at all.
+		fs.writeFileSync(
+			path.join(dir, 'old.guard.json'),
+			JSON.stringify({ name: 'old', pidFile, pid: 8, binaryPath: '/usr/bin/node' }),
+			'utf-8'
+		);
+		fs.writeFileSync(
+			path.join(dir, 'mixed.guard.json'),
+			JSON.stringify({ name: 'mixed', pidFile, pid: 9, binaryPath: '/usr/bin/node', args: ['a', 3] }),
+			'utf-8'
+		);
+		const byName = Object.fromEntries(readGuardDescriptors(dir).map((d) => [d.name, d]));
+		assert.deepEqual(byName.old, { name: 'old', pidFile, pid: 8, binaryPath: '/usr/bin/node' });
+		assert.deepEqual(byName.mixed, { name: 'mixed', pidFile, pid: 9, binaryPath: '/usr/bin/node' });
+	}));
+
 test('the suffix cannot collide with a lock or with the Harper port spelling', () => {
 	// One pids/ directory serves Harper's `<name>.pid` locks, the harper port's `.sidecar.json`
 	// descriptors and these; a shared spelling would have each reading the others' records.

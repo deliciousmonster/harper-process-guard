@@ -104,7 +104,7 @@ test('the reaper launch carries base64 targets with binary paths, and skips when
 			return wonChild(777);
 		};
 		const running = [
-			{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a', title: 'a' },
+			{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a', args: ['run', '-c', '/etc/a.yaml'], title: 'a' },
 			{ name: 'b', started: false, title: 'b', binaryPath: '/bin/b' },
 		];
 		const state = launchReaper(spawn, {
@@ -120,7 +120,13 @@ test('the reaper launch carries base64 targets with binary paths, and skips when
 			.map((b) => JSON.parse(Buffer.from(b, 'base64').toString('utf-8')));
 		// Only the started process is a target, and it carries the binary path the reaper
 		// needs to identify it before signalling.
-		assert.deepEqual(targets, [{ pidFile: path.join(dir, 'pids', 'a.pid'), pid: 11, binaryPath: '/bin/a' }]);
+		// The arguments travel with the path: for an interpreter the path alone names every
+		// sidecar on the node, this package's own reaper included.
+		assert.deepEqual(targets, [
+			{ pidFile: path.join(dir, 'pids', 'a.pid'), pid: 11, binaryPath: '/bin/a', args: ['run', '-c', '/etc/a.yaml'] },
+		]);
+		// The reaper's own identity, for a caller that sweeps its lock: `node` names nothing by itself.
+		assert.equal(state.args?.[0], script);
 
 		const none = launchReaper(spawn, {
 			reaperScript: script,
@@ -205,7 +211,7 @@ test('the reaper launch records each running process in a descriptor and names t
 				reaperScript: script,
 				rootPath: dir,
 				processes: [
-					{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a', title: 'a' },
+					{ name: 'a', started: true, pid: 11, binaryPath: '/bin/a', args: ['/opt/a/run.js'], title: 'a' },
 					{ name: 'b', started: false, title: 'b', binaryPath: '/bin/b' },
 				],
 				version: 7,
@@ -218,6 +224,7 @@ test('the reaper launch records each running process in a descriptor and names t
 			pidFile: path.join(pidDir, 'a.pid'),
 			pid: 11,
 			binaryPath: '/bin/a',
+			args: ['/opt/a/run.js'],
 		});
 		assert.equal(fs.existsSync(path.join(pidDir, 'b.guard.json')), false, 'an unstarted process was recorded');
 		const flagAt = calls[0].indexOf('--pid-dir');

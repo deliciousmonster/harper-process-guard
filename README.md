@@ -127,10 +127,14 @@ Types: `SweepAction`, `SweepTarget`.
 
 ### Identity
 
-- `identify(pid, binaryPath)` answers `'match'`, `'differs'` or `'unknown'`. Only `'match'` can
-  ever justify acting on a process, and `'unknown'` never reads as "not ours".
+- `identify(pid, binaryPath, expectedArgs?)` answers `'match'`, `'differs'` or `'unknown'`. Only
+  `'match'` can ever justify acting on a process, and `'unknown'` never reads as "not ours".
+  `expectedArgs` must be a leading run of the process's own arguments, which is what separates
+  two processes of one interpreter; without it the executable answers alone, as before.
 - `executableOf(pid)` is the executable behind a pid: absolute on Linux, as-invoked on macOS,
   `null` for "cannot tell".
+- `argumentsOf(pid)` is the argument vector behind a pid, `argv[0]` excluded, or `null` for
+  "cannot tell". `/proc/<pid>/cmdline` on Linux, `ps -o args=` on macOS.
 - `isAlive(pid)` says whether some process holds the pid and still runs: a zombie answers
   `kill(pid, 0)` but reads as dead here, since it can be neither signalled nor adopted. EPERM
   counts, since the process exists and is merely another user's.
@@ -292,6 +296,37 @@ fixes the adopt-a-stranger defect and it signals nothing, while a signal sent on
 identification cannot be taken back. Leaving an orphan is not leaving it unhandled either,
 because Harper's own lock replaces a process whose version no longer matches. The difference is
 that Harper does it without checking what it is signalling.
+
+### What the executable does not identify
+
+An executable identifies a process only where the executable is the process. For anything an
+interpreter runs it is not: `node a.js` and `node b.js` are the same binary. Measured on macOS
+with two unrelated node scripts running, `identify(sideB, process.execPath)` answered `match`
+while the caller was asking about sideA. Harper components are Node, so a Node sidecar holding a
+connection to a remote data source is at least as likely a consumer as a shipped native binary,
+and this package's own reaper is `node dist/reaper.js`: its identity was "the node binary", and
+any node process inheriting its recorded pid identified as it. The corpse-adoption hazard the
+sweep exists to close stood open for every script-based process, including ours.
+
+So identification takes the argument vector as well, `/proc/<pid>/cmdline` on Linux and
+`ps -o args=` on macOS. `identify(pid, binaryPath, expectedArgs)` narrows a `'match'` and only
+ever narrows it: a vector that differs reads `'differs'`, and one that cannot be read stays
+`'unknown'`. Expect nothing and the executable answers alone, which is what a native binary
+needs and what a caller written before this gets unchanged. `expectedArgs` is a leading run
+rather than the whole vector, so a caller pins the script path without predicting the flags that
+vary per launch. `bootstrap()` passes each process's declared `args`; `launchReaper` records them
+in the `.guard.json` descriptor beside the lock and in the reaper's `--target` payload, and puts
+the reaper's own command line on `ReaperState.args` for a caller that wants to identify that.
+
+What this buys is narrower than it looks. `/proc/<pid>/exe` is kernel-set and a process cannot
+rewrite it; argv lives in the process's own memory and it can. The arguments raise confidence
+against pid reuse and a lock left by an earlier boot, which is the threat here, and they prove
+nothing against a process that forges its own argv. On macOS `ps` has joined the vector with
+single spaces before anything here sees it, so an argument containing a space is
+indistinguishable from two and the comparison is made on the joined text; that platform still
+may not signal on a match at all. And a lock whose arguments have drifted since the boot that
+wrote it now reads `'differs'`, so the lock is removed and nothing is signalled where before the
+process was read as the same one. Pin the part of the command that is stable across boots.
 
 ### The barrier
 

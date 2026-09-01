@@ -21,6 +21,8 @@ export interface ReapTarget {
 	readonly pid: number;
 	/** Absolute path of the binary, so the child can be identified before it is signalled. */
 	readonly binaryPath: string;
+	/** The leading arguments it was started with, without which every `node <script>` child of this node shares one identity. Absent from a target written by an older launch, which then identifies by executable alone. */
+	readonly args?: readonly string[] | undefined;
 }
 
 export interface ReaperOptions {
@@ -80,7 +82,7 @@ function targetsFor(options: ReaperOptions, target: ReapTarget, recorded: number
 
 	return candidates.filter((candidate) => {
 		if (identificationCanAuthoriseSignal()) {
-			const verdict = identify(candidate, target.binaryPath);
+			const verdict = identify(candidate, target.binaryPath, target.args);
 			if (verdict === 'match') return true;
 			log(options, `${target.pidFile}: pid ${candidate} is not this process (${verdict}); left alone`);
 			return false;
@@ -138,6 +140,7 @@ export function collectTargets(options: ReaperOptions): ReapTarget[] {
 				pidFile: descriptor.pidFile,
 				pid: descriptor.pid,
 				binaryPath: descriptor.binaryPath,
+				...(descriptor.args && descriptor.args.length > 0 ? { args: descriptor.args } : {}),
 			});
 		}
 	}
@@ -186,7 +189,13 @@ export async function run(options: ReaperOptions): Promise<void> {
 	log(options, 'done.');
 }
 
-/** `--target <base64 json>` ({pidFile, pid, binaryPath}), repeatable. Base64 because every field is an absolute path and any single-character delimiter can appear inside one. */
+/** Strings only, and all-or-nothing: a vector with one non-string element describes a command line this cannot compare, so it names none. */
+function readArgs(decoded: object): string[] {
+	if (!('args' in decoded) || !Array.isArray(decoded.args)) return [];
+	return decoded.args.every((argument: unknown) => typeof argument === 'string') ? (decoded.args as string[]) : [];
+}
+
+/** `--target <base64 json>` ({pidFile, pid, binaryPath, args}), repeatable. Base64 because every field is an absolute path and any single-character delimiter can appear inside one. */
 export function parseArgs(argv: string[]): ReaperOptions {
 	const options: ReaperOptions = { harperPid: Number.NaN, targets: [], restartGraceMs: 8000 };
 	for (let i = 0; i < argv.length; i++) {
@@ -232,10 +241,14 @@ export function parseArgs(argv: string[]): ReaperOptions {
 						'pid' in decoded &&
 						(typeof decoded.pid === 'number' || typeof decoded.pid === 'string')
 					) {
+						const args = readArgs(decoded);
 						options.targets.push({
 							pidFile: decoded.pidFile,
 							pid: Number(decoded.pid),
 							binaryPath: 'binaryPath' in decoded && typeof decoded.binaryPath === 'string' ? decoded.binaryPath : '',
+							// Absent rather than empty, so a launch that named no arguments round-trips as the
+							// target an older launch would have produced.
+							...(args.length > 0 ? { args } : {}),
 						});
 					}
 				} catch {

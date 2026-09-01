@@ -11,12 +11,20 @@ import { pathToFileURL } from 'node:url';
 import { REPO_ROOT, importDist, makeTempDir, withTempDir } from '../support/harness.js';
 
 const { collectTargets, parseArgs, reapTarget, run } = await importDist('reaper.js');
-const { isAlive, identificationCanAuthoriseSignal } = await importDist('identity.js');
+const { isAlive, identify, identificationCanAuthoriseSignal } = await importDist('identity.js');
 const { writeGuardDescriptor, guardDescriptorPath } = await importDist('registry.js');
 
 /** A live child running this node binary, so it is identifiable as process.execPath. */
 function spawnOwn() {
 	const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore' });
+	child.unref();
+	return child;
+}
+
+/** A node process running `script`: the same executable as this package's own reaper, and as every other Node sidecar on a Harper node. */
+function spawnScript(script) {
+	fs.writeFileSync(script, 'setInterval(() => {}, 1 << 30);\n');
+	const child = spawn(process.execPath, [script], { stdio: 'ignore' });
 	child.unref();
 	return child;
 }
@@ -301,6 +309,81 @@ test('a zombie answers kill(pid, 0) yet reads as dead, so a corpse is neither ad
 	}
 });
 
+test('CRITICAL: the reaper is not merely "the node binary", so a node process inheriting its pid is not it', async () => {
+	// This package's own reaper is `node dist/reaper.js`. Identified by executable alone it was
+	// indistinguishable from any other Node sidecar, which is the corpse it exists to prevent.
+	const dir = makeTempDir('reap-identity-');
+	const reaperScript = path.join(REPO_ROOT, 'dist', 'reaper.js');
+	// Watching this runner, which outlives the assertions, so it stays in its poll loop.
+	const reaper = spawn(process.execPath, [reaperScript, '--harper-pid', String(process.pid)], {
+		stdio: 'ignore',
+		detached: true,
+	});
+	reaper.unref();
+	const impostor = spawnScript(path.join(dir, 'impostor.js'));
+	try {
+		await settle(reaper.pid);
+		await settle(impostor.pid);
+		assert.equal(identify(reaper.pid, process.execPath, [reaperScript]), 'match');
+		assert.equal(
+			identify(impostor.pid, process.execPath, [reaperScript]),
+			'differs',
+			'another node process answered to the reaper: any pid reuse adopts it'
+		);
+		// The executable is the same one, which is the whole difficulty.
+		assert.equal(identify(impostor.pid, process.execPath), 'match');
+	} finally {
+		for (const p of [reaper.pid, impostor.pid]) {
+			try {
+				process.kill(p, 'SIGKILL');
+			} catch {}
+		}
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("NEGATIVE: a node process running someone else's script is refused where the platform can identify", async () => {
+	const dir = makeTempDir('reap-script-');
+	const stranger = spawnScript(path.join(dir, 'stranger.js'));
+	try {
+		await settle(stranger.pid);
+		const pidFile = path.join(dir, 'agent.pid');
+		fs.writeFileSync(pidFile, `${stranger.pid}\n1`);
+		// Watched pid and file agree and the executable matches; only the script says otherwise.
+		await reapTarget(opts(), {
+			pidFile,
+			pid: stranger.pid,
+			binaryPath: process.execPath,
+			args: [path.join(dir, 'ours.js')],
+		});
+
+		if (identificationCanAuthoriseSignal()) {
+			assert.equal(isAlive(stranger.pid), true, 'the arguments proved this is not our process and it was signalled');
+		} else {
+			// macOS falls back to the pid it watched start, as the neighbouring case documents; the
+			// arguments narrow identification, they do not give this platform a signalling rule it lacks.
+			assert.equal(isAlive(stranger.pid), false);
+		}
+	} finally {
+		try {
+			process.kill(stranger.pid, 'SIGKILL');
+		} catch {}
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test('a target carries its arguments through the launch, and a target without them parses as one', () => {
+	const encoded = (target) => Buffer.from(JSON.stringify(target)).toString('base64');
+	const withArgs = { pidFile: '/pids/a.pid', pid: 42, binaryPath: '/usr/bin/node', args: ['/opt/agent/run.js', '-c'] };
+	assert.deepEqual(parseArgs(['--harper-pid', '7', '--target', encoded(withArgs)]).targets, [withArgs]);
+	// An older launch names no arguments, and its target must be the one it always was.
+	const bare = { pidFile: '/pids/a.pid', pid: 42, binaryPath: '/usr/bin/node' };
+	assert.deepEqual(parseArgs(['--harper-pid', '7', '--target', encoded(bare)]).targets, [bare]);
+	// All-or-nothing: a vector this cannot compare identifies by executable alone rather than partly.
+	assert.deepEqual(parseArgs(['--harper-pid', '7', '--target', encoded({ ...bare, args: ['a', 3] })]).targets, [bare]);
+	assert.deepEqual(parseArgs(['--harper-pid', '7', '--target', encoded({ ...bare, args: 'run.js' })]).targets, [bare]);
+});
+
 test('the target descriptor survives paths containing a colon', () =>
 	withTempDir('reap-args-', (dir) => {
 		// The previous spelling was `pidFile:pid` split on the last colon, which any path
@@ -332,7 +415,13 @@ test('targets are collected from descriptors on top of argv, and from argv alone
 		const argvTarget = { pidFile: path.join(dir, 'a.pid'), pid: 10, binaryPath: '/bin/a' };
 		// The same lock in argv and on disk: the descriptor wins, being the later record.
 		writeGuardDescriptor(dir, { name: 'a', pidFile: argvTarget.pidFile, pid: 11, binaryPath: '/bin/a2' });
-		writeGuardDescriptor(dir, { name: 'b', pidFile: path.join(dir, 'b.pid'), pid: 20, binaryPath: '/bin/b' });
+		writeGuardDescriptor(dir, {
+			name: 'b',
+			pidFile: path.join(dir, 'b.pid'),
+			pid: 20,
+			binaryPath: '/bin/b',
+			args: ['/opt/agent/run.js'],
+		});
 		fs.writeFileSync(path.join(dir, 'c.guard.json'), 'torn{', 'utf-8');
 
 		const merged = collectTargets({ harperPid: 1, targets: [argvTarget], restartGraceMs: 50, pidDir: dir });
@@ -340,7 +429,7 @@ test('targets are collected from descriptors on top of argv, and from argv alone
 			merged.toSorted((x, y) => x.pidFile.localeCompare(y.pidFile)),
 			[
 				{ pidFile: argvTarget.pidFile, pid: 11, binaryPath: '/bin/a2' },
-				{ pidFile: path.join(dir, 'b.pid'), pid: 20, binaryPath: '/bin/b' },
+				{ pidFile: path.join(dir, 'b.pid'), pid: 20, binaryPath: '/bin/b', args: ['/opt/agent/run.js'] },
 			]
 		);
 		// No pidDir is the old launch spelling; the argv seed must keep working verbatim.

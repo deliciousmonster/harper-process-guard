@@ -16,6 +16,8 @@ export interface GuardDescriptor {
 	readonly pid: number;
 	/** Absolute path of the binary, so the process can be identified before it is signalled. */
 	readonly binaryPath: string;
+	/** The leading arguments it was started with; without them every `node <script>` process on this node identifies as the same one. Absent from a record written before this field existed. */
+	readonly args?: readonly string[] | undefined;
 }
 
 export function guardDescriptorPath(pidDir: string, name: string): string {
@@ -49,10 +51,20 @@ export function readGuardDescriptors(pidDir: string): GuardDescriptor[] {
 		try {
 			const parsed: unknown = JSON.parse(readFileSync(join(pidDir, entry), 'utf-8'));
 			if (typeof parsed !== 'object' || parsed === null) continue;
-			const { name, pidFile, pid, binaryPath } = parsed as Record<string, unknown>;
+			const { name, pidFile, pid, binaryPath, ...rest } = parsed as Record<string, unknown>;
 			if (typeof name !== 'string' || typeof pidFile !== 'string') continue;
 			if (typeof pid !== 'number' || !Number.isInteger(pid)) continue;
-			descriptors.push({ name, pidFile, pid, binaryPath: typeof binaryPath === 'string' ? binaryPath : '' });
+			// Absent rather than empty when nothing was recorded, so a descriptor written before this
+			// field existed reads back as the record it is.
+			const args =
+				Array.isArray(rest.args) && rest.args.every((a: unknown) => typeof a === 'string') ? rest.args : null;
+			descriptors.push({
+				name,
+				pidFile,
+				pid,
+				binaryPath: typeof binaryPath === 'string' ? binaryPath : '',
+				...(args && args.length > 0 ? { args } : {}),
+			});
 		} catch {
 			// Absent, half-written or not JSON: dropped rather than guessed at.
 		}

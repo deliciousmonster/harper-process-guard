@@ -9,12 +9,22 @@ import { spawn } from 'node:child_process';
 import { importDist, makeTempDir, withTempDir } from '../support/harness.js';
 
 const { sweepStaleLocks, describeSweep, removeIfStill } = await importDist('sweep.js');
-const { isAlive, identify, readLock, identificationCanAuthoriseSignal } = await importDist('identity.js');
+const { isAlive, identify, identifyArguments, argumentsOf, readLock, identificationCanAuthoriseSignal } =
+	await importDist('identity.js');
 const { writeGuardDescriptor, guardDescriptorPath } = await importDist('registry.js');
 
 /** A live child running THIS node binary, so it identifies as `process.execPath`. */
 function spawnOwnBinary() {
 	const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1 << 30)'], { stdio: 'ignore' });
+	child.unref();
+	return child;
+}
+
+/** A node process running `script`, which is what a Harper sidecar is: the executable is the interpreter, so only argv separates it from any other. */
+function spawnScript(script) {
+	fs.mkdirSync(path.dirname(script), { recursive: true });
+	fs.writeFileSync(script, 'setInterval(() => {}, 1 << 30);\n');
+	const child = spawn(process.execPath, [script], { stdio: 'ignore' });
 	child.unref();
 	return child;
 }
@@ -148,6 +158,94 @@ test('identify separates ours, not-ours and cannot-tell', () => {
 	assert.equal(identify(DEAD_PID, process.execPath), 'differs', 'a dead pid is not running our binary');
 	assert.equal(identify(process.pid, ''), 'unknown');
 });
+
+test('REGRESSION: two node scripts are not the same process, though they are the same executable', async () => {
+	// Measured before the fix: identify(sideB, process.execPath) answered 'match' while the caller
+	// was asking about sideA. Every Node sidecar on a node had one identity, this package's reaper included.
+	const dir = makeTempDir('identify-scripts-');
+	const sideA = path.join(dir, 'side-a.js');
+	const sideB = path.join(dir, 'side-b.js');
+	const a = spawnScript(sideA);
+	const b = spawnScript(sideB);
+	try {
+		await settle(a.pid);
+		await settle(b.pid);
+		assert.equal(
+			identify(b.pid, process.execPath, [sideA]),
+			'differs',
+			"sideB answered to sideA's name: two unrelated node scripts are still one identity"
+		);
+		assert.equal(identify(a.pid, process.execPath, [sideA]), 'match', 'the comparison would be vacuous otherwise');
+		// argv[0] is the interpreter, which executableOf already answers; this starts at argv[1].
+		assert.deepEqual(argumentsOf(a.pid), [sideA]);
+		// The executable alone still cannot tell them apart, which is why the arguments are asked for.
+		assert.equal(identify(b.pid, process.execPath), 'match');
+	} finally {
+		for (const child of [a, b]) {
+			try {
+				process.kill(child.pid, 'SIGKILL');
+			} catch {}
+		}
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test('a native binary is identified by its executable alone, exactly as before', async () => {
+	// /bin/sleep takes no script and expects no arguments, so nothing about this path changed:
+	// the same three answers, from the same comparison.
+	const child = spawnForeign();
+	try {
+		await settle(child.pid);
+		assert.equal(identify(child.pid, process.execPath), 'differs');
+		assert.equal(identify(process.pid, process.execPath, []), 'match', 'an empty vector must not narrow anything');
+		assert.equal(identify(process.pid, '/nonexistent/agent', ['x']), 'unknown');
+		assert.equal(identify(DEAD_PID, process.execPath, ['x']), 'differs');
+	} finally {
+		try {
+			process.kill(child.pid, 'SIGKILL');
+		} catch {}
+	}
+});
+
+test('an argument vector that cannot be read is unknown, never differs', () => {
+	// The seam rather than a process whose argv is unreadable: a kernel thread exists on Linux and
+	// not on macOS, and "cannot tell" must answer the same on both.
+	assert.equal(identifyArguments(null, ['/opt/agent/run.js']), 'unknown');
+	assert.equal(identifyArguments(null, []), 'match', 'nothing expected asks nothing of the process');
+	assert.equal(identifyArguments(['/opt/agent/run.js'], ['/opt/agent/run.js']), 'match');
+	assert.equal(identifyArguments(['/opt/agent/run.js', '--port', '8126'], ['/opt/agent/run.js']), 'match');
+	assert.equal(identifyArguments(['/opt/agent/other.js'], ['/opt/agent/run.js']), 'differs');
+	assert.equal(identifyArguments([], ['/opt/agent/run.js']), 'differs');
+	// A leading run, not a substring: a caller pins the head of the command and nothing further in.
+	assert.equal(identifyArguments(['--port', '/opt/agent/run.js'], ['/opt/agent/run.js']), 'differs');
+	assert.equal(identifyArguments(['--conf'], ['--config']), 'differs', 'a prefix of one argument is not that argument');
+	// A dead pid has no vector to read, which is the same "cannot tell".
+	assert.equal(argumentsOf(DEAD_PID), null, 'a dead pid has no vector to read');
+});
+
+test("REGRESSION: the sweep will not adopt a node process running someone else's script", () =>
+	withTempDir('sweep-scripts-', async (dir) => {
+		const pidDir = path.join(dir, 'pids');
+		const ours = path.join(dir, 'ours.js');
+		const theirs = path.join(dir, 'theirs.js');
+		const stranger = spawnScript(theirs);
+		try {
+			await settle(stranger.pid);
+			// The version matches, so without the arguments this is 'kept-for-adoption': the node
+			// adopts a process it never started and never starts the one it needs.
+			writeLock(pidDir, 'agent', stranger.pid, 4242);
+			const actions = await sweepStaleLocks({
+				pidDir,
+				targets: [{ name: 'agent', binaryPath: process.execPath, args: [ours], version: 4242 }],
+			});
+			assert.deepEqual(actions, [{ name: 'agent', pid: stranger.pid, action: 'removed-foreign' }]);
+			assert.equal(isAlive(stranger.pid), true, 'a stranger identified as foreign is never signalled');
+		} finally {
+			try {
+				process.kill(stranger.pid, 'SIGKILL');
+			} catch {}
+		}
+	}));
 
 test('isAlive refuses the process-group selectors kill(2) accepts', () => {
 	assert.equal(isAlive(0), false, '0 is the caller process group');

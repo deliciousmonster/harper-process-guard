@@ -76,6 +76,34 @@ export function executableOf(pid: number): string | null {
 	}
 }
 
+/** The argument vector behind a pid, argv[0] excluded; null is "cannot tell", never "no arguments". Unlike /proc/<pid>/exe this is the process's OWN memory, so it can rewrite it: see identify(). */
+export function argumentsOf(pid: number): string[] | null {
+	if (!isAlive(pid)) return null;
+	try {
+		if (process.platform === 'linux') {
+			// NUL-separated with a trailing NUL. Empty for a kernel thread and for a process whose
+			// argv area is unreadable, which is "cannot tell" rather than "no arguments".
+			const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
+			if (raw === '') return null;
+			return raw.replace(/\0$/, '').split('\0').slice(1);
+		}
+		if (process.platform === 'darwin') {
+			// `ps` has already joined the vector with single spaces, so an argument containing a
+			// space is indistinguishable from two arguments; identifyArguments() compares joined.
+			const out = execFileSync('ps', ['-p', String(pid), '-o', 'args='], {
+				encoding: 'utf-8',
+				timeout: 2000,
+				stdio: ['ignore', 'pipe', 'ignore'],
+			}).trim();
+			return out === '' ? null : out.split(/\s+/).slice(1);
+		}
+		// Windows and anything else, same as executableOf: a caller that cannot see must do nothing.
+		return null;
+	} catch {
+		return null;
+	}
+}
+
 export type Identification =
 	/** This pid is running that binary. A caller may act on it. */
 	| 'match'
@@ -84,8 +112,33 @@ export type Identification =
 	/** Not established. A caller must not signal it, and should say so. */
 	| 'unknown';
 
-/** 'match' requires full-path equality. A bare-name mismatch still proves 'differs', but a bare-name match proves nothing (two binaries share a basename) and yields 'unknown'. */
-export function identify(pid: number, binaryPath: string): Identification {
+/** The argv half of identify(), and its own function so the unreadable case is testable without a process whose argv cannot be read. `expected` must be a LEADING RUN of `actual`, so a caller pins as much of the command as it knows is stable. */
+export function identifyArguments(actual: readonly string[] | null, expected: readonly string[]): Identification {
+	if (expected.length === 0) return 'match';
+	if (actual === null) return 'unknown';
+	if (process.platform === 'darwin') {
+		// Compared as joined text, because `ps` joined it already and re-splitting reads one
+		// spaced argument as two; the boundary check keeps `--conf` from matching `--config`.
+		const head = actual.join(' ');
+		const want = expected.join(' ');
+		return head === want || head.startsWith(`${want} `) ? 'match' : 'differs';
+	}
+	return expected.every((argument, index) => actual[index] === argument) ? 'match' : 'differs';
+}
+
+/** 'match' requires full-path equality of the executable, and `expectedArgs` as a leading run of the process's own arguments. A bare-name mismatch still proves 'differs', but a bare-name match proves nothing (two binaries share a basename) and yields 'unknown'. */
+export function identify(pid: number, binaryPath: string, expectedArgs: readonly string[] = []): Identification {
+	const executable = identifyExecutable(pid, binaryPath);
+	// An interpreter is the same executable for every script it runs, so `node a.js` and `node b.js`
+	// are one identity until argv separates them. Nothing expected (a native binary): unchanged.
+	if (executable !== 'match' || expectedArgs.length === 0) return executable;
+	// argv lives in the examined process's own memory and it may rewrite it, where /proc/<pid>/exe is
+	// kernel-set. It raises confidence against pid reuse and a stale lock, and forges nothing away.
+	return identifyArguments(argumentsOf(pid), expectedArgs);
+}
+
+/** The executable half, which is all identification was until scripts made one executable serve every consumer. */
+function identifyExecutable(pid: number, binaryPath: string): Identification {
 	if (!binaryPath) return 'unknown';
 	if (!isAlive(pid)) return 'differs';
 	const actual = executableOf(pid);

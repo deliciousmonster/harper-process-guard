@@ -54,6 +54,8 @@ export interface ProcessState {
 	name: string;
 	title: string;
 	binaryPath: string;
+	/** What it was started with. Carried so the reaper and a later sweep can tell this process from another running the same interpreter. */
+	args?: readonly string[] | undefined;
 	started: boolean;
 	/** True when this thread lost the PID-file race and joined an existing process. */
 	adopted?: boolean;
@@ -255,6 +257,9 @@ export function startProcess(
 		started: false,
 	};
 	state.respawnAttempts = attempt;
+	// Re-assigned on a respawn too: a state object handed in by an older caller carries no arguments,
+	// and identification without them is the defect this closes.
+	state.args = descriptor.args;
 	// Clear the last incarnation's death, or one early exit reads as a dead process beside a live pid forever.
 	state.exited = undefined;
 	state.error = undefined;
@@ -441,6 +446,8 @@ export interface ReaperState {
 	/** True once this thread has seen the reaper end, so a status surface holding this state stops reading healthy. */
 	exited?: boolean | undefined;
 	command?: string;
+	/** The reaper's own arguments, so a caller sweeping its lock can identify it: the command is `node`, which every Harper component's sidecar also is. */
+	args?: readonly string[] | undefined;
 	error?: string;
 }
 
@@ -504,6 +511,7 @@ export function launchReaper(
 				pidFile: join(pidDir, `${p.name}.pid`),
 				pid: p.pid,
 				binaryPath: p.binaryPath ?? '',
+				...(p.args && p.args.length > 0 ? { args: p.args } : {}),
 			});
 		} catch (error) {
 			log.warn(
@@ -544,7 +552,12 @@ export function launchReaper(
 		...running.flatMap((p) => [
 			'--target',
 			Buffer.from(
-				JSON.stringify({ pidFile: join(pidDir, `${p.name}.pid`), pid: p.pid, binaryPath: p.binaryPath ?? '' })
+				JSON.stringify({
+					pidFile: join(pidDir, `${p.name}.pid`),
+					pid: p.pid,
+					binaryPath: p.binaryPath ?? '',
+					...(p.args && p.args.length > 0 ? { args: p.args } : {}),
+				})
 			).toString('base64'),
 		]),
 	];
@@ -564,6 +577,7 @@ export function launchReaper(
 				env: process.env,
 			});
 			state.command = command;
+			state.args = args;
 			break;
 		} catch (error) {
 			refusals.push(`${command}: ${errorMessage(error)}`);

@@ -17,6 +17,8 @@ export interface SweepTarget {
 	readonly name: string;
 	/** Absolute path of the binary, used to identify an orphan. Resolve it before calling. */
 	readonly binaryPath: string;
+	/** The leading arguments it was started with, which is what separates two processes of one interpreter: `node a.js` and `node b.js` are the same executable. Omitted, identification is by executable alone, as before. Pin only what is stable across boots; a lock whose arguments have drifted reads as a different process. */
+	readonly args?: readonly string[] | undefined;
 	/** The version this caller will pass to spawn. A live process under a MATCHING lock is a handover `harper restart` depends on, not an orphan; only a mismatch marks a dead configuration. */
 	readonly version?: number | undefined;
 }
@@ -80,7 +82,7 @@ export async function sweepStaleLocks({
 			continue;
 		}
 
-		const identification = identify(lock.pid, target.binaryPath);
+		const identification = identify(lock.pid, target.binaryPath, target.args);
 
 		if (identification === 'differs') {
 			// Live, and demonstrably something else. The lock is ours to remove; the process
@@ -184,7 +186,7 @@ export function describeSweep(actions: readonly SweepAction[]): string[] {
 			case 'orphan-survived':
 				return `an orphaned ${a.name} (pid ${a.pid}) did not exit after SIGTERM. Its lock is removed, but it may still hold its ports, in which case the replacement will not bind.`;
 			case 'removed-foreign':
-				return `the ${a.name} lock named pid ${a.pid}, which is live but is running something else: the lock is from an earlier boot and its pid has been reused. Removed the lock and signalled nothing.`;
+				return `the ${a.name} lock named pid ${a.pid}, which is live but is running something else: a different executable, or the same one under a different command line. Either an earlier boot's pid has been reused, or that boot started it with a command this one does not use. Removed the lock and signalled nothing.`;
 			case 'removed-unidentifiable':
 				return `the ${a.name} lock named live pid ${a.pid}, which could not be identified on this platform. Removed the lock and signalled nothing; if that process was an orphan it still holds its ports.`;
 			case 'reported-orphan':
