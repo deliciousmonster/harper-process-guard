@@ -58,11 +58,21 @@ const status = await bootstrap({
 The `spawn` you pass must be your own `import { spawn } from 'node:child_process'`. Harper
 grants its constrained child_process only to modules reached by relative import from the
 component entry, and a package loaded by bare specifier is not one, so the capability has to
-arrive as an argument. `bootstrap()` probes what it was handed and says loudly when it got
-Node's real spawn instead.
+arrive as an argument. `bootstrap()` probes what it was handed, and when it got Node's real
+spawn instead it starts nothing at all.
 
-The returned status carries the sweep report, one state per process with the verify verdicts
-attached, and the reaper's.
+That refusal is the point rather than a degraded mode. Without Harper's spawn there is no
+PID-file lock and no agreement between worker threads, so every thread that reached the call
+would start its own copy of every process; the singleton this package exists for does not hold.
+The result carries a `refused` object naming what did not start and why, plus one `ProcessState`
+per declared process with `started: false` and that reason as its `error`. The same sentence
+lands in `report` and in the single log line, so a status endpoint rendering the result shows
+the refusal without anyone opening `hdb.log`. There is no flag to spawn anyway: a caller that
+genuinely wants unsupervised children composes `startProcess()` itself, where the choice is
+visible at the call site.
+
+The returned status otherwise carries the sweep report, one state per process with the verify
+verdicts attached, and the reaper's.
 
 Without `spawn` the call sweeps and writes any `configFiles`, and never starts anything:
 Harper's spawn is what enforces the binary allowlist and takes the lock, and the caller keeps
@@ -86,12 +96,14 @@ modules.
 
 - `bootstrap(options)` sweeps stale locks once per Harper process and writes the config files;
   when `spawn` is given it also starts each process, launches the reaper and runs each `verify`.
-  Returns a `Promise<BootstrapResult>`.
+  A `spawn` that fails the interception probe starts nothing and comes back refused. Returns a
+  `Promise<BootstrapResult>`.
 
 Types: `BootstrapOptions`, `BootstrapProcess` (one process under the guard's care: the sweep
 target plus how to start and prove it), `BootstrapReaper` (how the guard's reaper launches;
 `false` skips it), `BootstrapResult` (the sweep report, one `ProcessState` per declared process,
-and the `ReaperState`).
+and the `ReaperState`), `BootstrapRefusal` (why nothing was started, in fields a status endpoint
+can render).
 
 ### The barrier
 
@@ -130,7 +142,9 @@ Types: `Identification`.
 ### The spawn layer
 
 - `assertConstrainedSpawn(spawn, log, hint?)` proves the spawn is Harper's constrained one by
-  probing with a command that must not exist, and reports loudly when it is not.
+  probing with a command that must not exist, and reports loudly when it is not. It reports
+  rather than throws: `bootstrap()` turns a false verdict into a refusal, and a caller driving
+  `startProcess()` itself decides what the verdict is worth.
 - `fingerprint(...parts)` hashes anything stringifiable into a version number inside 2^31,
   because Harper `parseInt()`s it.
 - `preflightBinary(title, binaryPath)` throws for a binary Harper cannot start: a spaced path no
@@ -187,6 +201,10 @@ mismatch Harper replaces the process instead. `fingerprintParts` is what feeds t
 `bootstrap()` hashes the parts into a number carried on every spawn, so a changed configuration
 replaces the process, an unchanged one is adopted, and `harper restart` depends on that adoption
 to hand running children to a replacement node.
+
+All of it hangs off Harper's spawn, which is why `bootstrap()` starts nothing through a spawn
+that fails the probe. Through Node's own `child_process` there is no lock to join, so the count
+is one process per thread rather than one per node.
 
 ### Joining a running process
 

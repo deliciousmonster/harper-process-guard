@@ -257,26 +257,75 @@ test('fingerprintParts beside a per-process version is refused as a contradictio
 		);
 	}));
 
-test('a stock spawn is recorded and the lifecycle still runs; the caller decides what it means', () =>
+test('MUTATION: a spawn Harper is not intercepting starts nothing, and the refusal comes back in the result', () =>
 	withTempDir('lifecycle-stock-', async (dir) => {
 		const log = recordingLog();
+		const names = [];
 		// This stub permits the probe, which is exactly what Node's real child_process would do.
 		const spawn = (command, args, options) => {
-			void command;
-			void args;
-			void options;
+			names.push(options.name);
 			return wonChild(2000);
 		};
 		const result = await bootstrap({
 			spawn,
 			log,
 			rootPath: dir,
-			interceptionHint: 'All but one trace-agent will fail to bind 127.0.0.1:8126.',
-			processes: [{ name: 'alpha', binaryPath: process.execPath }],
+			interceptionHint: 'No trace-agent means every span this node produces is discarded.',
+			processes: [
+				{ name: 'alpha', title: 'trace agent', binaryPath: process.execPath },
+				{ name: 'beta', title: 'core agent', binaryPath: process.execPath },
+			],
 		});
+
+		// Nothing but the probe may reach an unintercepted spawn: each of these would be a copy no lock deduped.
+		const spawned = names.filter((name) => name !== 'guard-spawn-probe');
+		assert.deepEqual(spawned, [], `bootstrap spawned through an unintercepted child_process: ${spawned.join(', ')}`);
 		assert.equal(result.intercepted, false);
+		assert.equal('reaper' in result, false);
+
+		// The status endpoint renders the result, so the refusal has to be there and not only in hdb.log.
+		assert.match(result.refused.reason, /^Nothing was started: /);
+		assert.ok(result.refused.reason.includes('trace agent, core agent'));
+		assert.equal(result.refused.detail, 'spawn of a bogus command was permitted');
+		assert.deepEqual(result.refused.processes, ['trace agent', 'core agent']);
+		assert.equal(result.report.at(-1), result.refused.reason);
+		// One state per declared process, in declaration order: a caller zipping these against its own list still can.
+		assert.equal(result.processes.length, 2);
+		for (const state of result.processes) {
+			assert.equal(state.started, false);
+			assert.match(state.error, /refused to spawn it/);
+		}
+
+		// Once, not twice: the plugin handed the probe to bootstrap to stop double-logging it per thread.
+		assert.equal(log.lines.error.length, 1, log.lines.error.join(' | '));
+		assert.match(log.lines.error[0], /NOT ACTIVE/);
+		assert.ok(log.lines.error[0].includes('trace agent, core agent'));
+		assert.ok(log.lines.error[0].includes('every span this node produces is discarded'));
+	}));
+
+test('an intercepted spawn is untouched by the refusal path', () =>
+	withTempDir('lifecycle-intercepted-', async (dir) => {
+		const log = recordingLog();
+		const spawn = stubSpawn();
+		const result = await bootstrap({
+			spawn,
+			log,
+			rootPath: dir,
+			processes: [
+				{ name: 'alpha', binaryPath: process.execPath },
+				{ name: 'beta', binaryPath: process.execPath, verify: async () => ({ ok: true }) },
+			],
+		});
+		assert.equal(result.intercepted, true);
+		assert.equal('refused' in result, false);
+		assert.deepEqual(
+			spawn.calls.map((call) => call.options.name),
+			['alpha', 'beta', REAPER_NAME]
+		);
 		assert.equal(result.processes[0].started, true);
-		assert.ok(log.lines.error.some((line) => line.includes('fail to bind 127.0.0.1:8126')));
+		assert.equal(result.processes[1].verified, true);
+		assert.equal(result.reaper.started, true);
+		assert.deepEqual(log.lines.error, []);
 	}));
 
 test('reaper: false skips the launch and the result carries no reaper', () =>

@@ -41,7 +41,9 @@ anything a component runs. `index.ts` composes it all into the one-call `bootstr
 ordering is load-bearing: resolve before the sweep (the sweep needs binary paths to adjudicate
 locks), configs after the barrier, the reaper before any verify (a probe can wait 30 seconds,
 and a node killed inside that window must not orphan the children). The lifecycle suite has a
-MUTATION test on each ordering. `bootstrap()` resolves its own `dist/reaper.js` through
+MUTATION test on each ordering. A spawn that fails the interception probe stops the lifecycle
+before the first `startProcess()`: without Harper's lock the count is one process per thread, so
+refusing is the behaviour rather than a fallback, and a MUTATION test holds it there. `bootstrap()` resolves its own `dist/reaper.js` through
 `import.meta.url`, so index.js and reaper.js must stay siblings in `dist/`. `npm test` builds
 first. `test/support/harness.js` is scaffolding shared by the suites.
 

@@ -106,8 +106,18 @@ export interface BootstrapOptions {
 	readonly configFiles?: Readonly<Record<string, string>> | undefined;
 	/** The guard's reaper, launched by default when the lifecycle runs; `false` skips it. */
 	readonly reaper?: BootstrapReaper | false | undefined;
-	/** Appended to the not-intercepted report, restoring the concrete consequence the generic message cannot name. */
+	/** Appended to the not-intercepted report, naming in the caller's terms what does not run when nothing starts. */
 	readonly interceptionHint?: string | undefined;
+}
+
+/** Why bootstrap started nothing, in fields a status endpoint can render beside the process list. */
+export interface BootstrapRefusal {
+	/** One sentence: what did not start, and why starting it would have been worse than not. */
+	readonly reason: string;
+	/** The probe's own verdict, for a caller that renders the raw finding beside the sentence. */
+	readonly detail: string;
+	/** The declared processes, by title, so a status page can name what is missing. */
+	readonly processes: readonly string[];
 }
 
 export interface BootstrapResult {
@@ -115,10 +125,12 @@ export interface BootstrapResult {
 	swept: boolean;
 	/** What the sweep did. Empty for a thread that waited, since the work was not its own. */
 	actions: SweepAction[];
-	/** One line per action, plus a line when the sweep could not be established at all. */
+	/** One line per action, plus a line when the sweep could not be established, and one when spawning was refused. */
 	report: string[];
 	/** Whether the spawn proved to be Harper's constrained one. Only set when `spawn` was given. */
 	intercepted?: boolean | undefined;
+	/** Set when nothing was started on purpose. Absent on every path that spawned. */
+	refused?: BootstrapRefusal | undefined;
 	/** The version computed from fingerprintParts and passed to every spawn. */
 	version?: number | undefined;
 	/** One state per declared process, in declaration order. */
@@ -239,9 +251,19 @@ export async function bootstrap({
 		);
 	}
 
-	const intercepted = spawn
-		? assertConstrainedSpawn(spawn, log, { notInterceptedHint: interceptionHint }).intercepted
+	const declared = processes.map((proc) => proc.title ?? proc.name);
+	// One sentence, written once and carried by every surface that reports the refusal.
+	const refusalReason =
+		`Nothing was started: the spawn given to bootstrap is not Harper's constrained ` +
+		`child_process, so there is no PID lock behind it and every worker thread would start ` +
+		`its own copy of ${declared.length ? declared.join(', ') : 'each declared process'}.`;
+	// Carried in the probe's report, so a spawn that is not intercepted produces one log line rather than two.
+	const probe = spawn
+		? assertConstrainedSpawn(spawn, log, {
+				notInterceptedHint: `${refusalReason}${interceptionHint ? ` ${interceptionHint}` : ''}`,
+			})
 		: undefined;
+	const intercepted = probe?.intercepted;
 
 	// Resolved before the sweep, which needs binaryPath to identify a lock's process; one bad binary disables only itself.
 	// Each resolution rides beside its process, so nothing downstream lines up parallel arrays by index.
@@ -289,6 +311,26 @@ export async function bootstrap({
 	if (configFiles) writeConfigFiles(configFiles, log);
 
 	if (!spawn) return swept;
+
+	// Spawning here is the per-thread multi-spawn the PID lock exists to prevent, so the lifecycle stops instead.
+	// One state per declared process, in the order a caller's status endpoint expects, each saying why it is absent.
+	if (probe && !probe.intercepted) {
+		const refused: BootstrapResult = {
+			...swept,
+			report: [...swept.report, refusalReason],
+			intercepted,
+			refused: { reason: refusalReason, detail: probe.detail, processes: declared },
+			processes: prepared.map(({ proc, binaryPath }) => ({
+				name: proc.name,
+				title: proc.title ?? proc.name,
+				binaryPath,
+				started: false,
+				error: `not started: Harper's spawn interception is not active, so the guard refused to spawn it`,
+			})),
+		};
+		if (version !== undefined) refused.version = version;
+		return refused;
+	}
 
 	const jobs = prepared.map(({ proc, binaryPath, resolveError }) => {
 		const state = startProcess(

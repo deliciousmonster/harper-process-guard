@@ -106,7 +106,10 @@ export function preflightBinary(title: string, binaryPath: string): void {
 /** A command that must not exist, so permitting it proves the spawn is not constrained. */
 const PROBE_COMMAND = 'harper-process-guard-spawn-probe-must-not-exist';
 
-/** Prove the spawn is Harper's constrained one; only Harper's wrapper throws synchronously from spawn(). */
+/**
+ * Prove the spawn is Harper's constrained one; only Harper's wrapper throws synchronously from spawn().
+ * Reports rather than throws: bootstrap() turns a false verdict into a refusal, a direct caller decides for itself.
+ */
 export function assertConstrainedSpawn(
 	spawn: ConstrainedSpawn,
 	log: GuardLog,
@@ -144,8 +147,8 @@ export function assertConstrainedSpawn(
 	log.error(
 		`process guard: HARPER'S SPAWN INTERCEPTION IS NOT ACTIVE. Spawning "${PROBE_COMMAND}" ` +
 			`was permitted, which means the caller handed over Node's real child_process. There is ` +
-			`no PID-file singleton: every worker thread will start its own copy of each process, ` +
-			`all but one will fail to bind their ports, and none of that is reported anywhere. ` +
+			`no PID-file singleton behind this spawn: nothing dedupes it, so every worker thread ` +
+			`that spawns through it starts its own copy of each process and all but one fails to bind its ports. ` +
 			`Causes, in order of likelihood: the calling module was not reached by a RELATIVE ` +
 			`import from the component entry (a bare npm specifier is loaded natively unless the ` +
 			`package depends on harper); child_process was pulled in with require() instead of ` +
