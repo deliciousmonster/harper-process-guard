@@ -31,6 +31,11 @@ None of these are style, and README.md explains each:
   imported.
 - `spawn` comes from the caller. That is what makes the guard testable with a fake and usable by a
   host that constrains `child_process`.
+- A double stands in for an external boundary (`spawn`, the filesystem, a real child process) and
+  its calls are checked as evidence of a real contract, never as a stand-in for this package's own
+  logic. A test that mocks a piece of `src/` and asserts only how the mock was called is not
+  coverage, however many assertions it has - it has to assert what a real pid, lock file, or process
+  state actually did. Audited clean against this once (MOD-17); keep it that way.
 
 A green suite is not a review here. Each property above can be broken in ways a partial suite still
 passes, so a change to the semantics of `lock.js`, `supervise.js` or `reaper.js` gets an adversarial
