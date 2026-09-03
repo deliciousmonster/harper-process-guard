@@ -25,9 +25,10 @@ export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs:
 
 /**
  * The caller's spawn, injected rather than imported: that is what makes this testable with a fake and
- * usable by a host that hands out a constrained child_process.
+ * usable by a host that hands out a constrained child_process. `name` is Harper's own extension: its
+ * constrained spawn throws without one, and stock Node ignores it.
  *
- * @typedef {(command: string, args: string[], options: import('node:child_process').SpawnOptions) => SpawnedChild} Spawn
+ * @typedef {(command: string, args: string[], options: import('node:child_process').SpawnOptions & { name?: string }) => SpawnedChild} Spawn
  */
 
 /**
@@ -184,7 +185,11 @@ async function attempt(ctx, descriptor, state, restarts) {
 	/** @type {SpawnedChild} */
 	let child;
 	try {
-		child = ctx.spawn(descriptor.binaryPath, [...descriptor.args], descriptor.spawnOptions);
+		// Last, so a caller's own spawnOptions cannot shadow the identity Harper's spawn gate checks against.
+		child = ctx.spawn(descriptor.binaryPath, [...descriptor.args], {
+			...descriptor.spawnOptions,
+			name: descriptor.name,
+		});
 	} catch (error) {
 		state.error = `the spawn of the ${state.title} was refused: ${errorMessage(error)}`;
 		ctx.log.error(`process guard: ${state.error} (${descriptor.binaryPath})`);

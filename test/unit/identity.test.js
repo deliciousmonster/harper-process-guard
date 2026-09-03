@@ -2,10 +2,25 @@
 // Identification decides what may be signalled, so every case here is about what the guard is allowed
 // to conclude, not about what it happens to read.
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import test from 'node:test';
 
 import { argvOf, compareArgv, identify, isAlive } from '../../src/identity.js';
 import { deadPid, fixture, pidOf, readyLine, waitFor, withSpawn } from '../support/harness.js';
+
+// Harper's real vm-current-context sandbox substitutes node:child_process with a stub exposing only
+// these five names; execFileSync silently isn't one, and a real Harper node refuses to load the
+// component that imports it rather than merely doing without it.
+const HARPER_CHILD_PROCESS_STUB = new Set(['exec', 'execFile', 'fork', 'spawn', 'execSync']);
+
+test('identity.js imports only what a real Harper node actually gives it from node:child_process', () => {
+	const source = fs.readFileSync(new URL('../../src/identity.js', import.meta.url), 'utf-8');
+	const imported = source.match(/import \{ ([^}]+) \} from 'node:child_process';/)?.[1];
+	assert.ok(imported, 'expected a named import from node:child_process');
+	for (const name of imported.split(',').map((n) => n.trim())) {
+		assert.ok(HARPER_CHILD_PROCESS_STUB.has(name), `'${name}' is not in Harper's constrained child_process`);
+	}
+});
 
 test('pid 1 reads as alive, so a containerised host is not reaped on sight', () => {
 	// Inside a container the host process IS pid 1. A guard that treats 1 as an invalid pid stops it.

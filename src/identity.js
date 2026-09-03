@@ -1,7 +1,7 @@
 // @ts-check
 // A process is identified by its command line. /proc/<pid>/exe is kernel-set and unspoofable, and
 // useless here: it resolves to the interpreter, so every node script on the box reads identical.
-import { execFileSync } from 'node:child_process';
+import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 /**
@@ -57,7 +57,9 @@ function inspect(pid) {
 			return { alive: true, argv: raw === '' ? null : raw.replace(/\0$/, '').split('\0') };
 		}
 		if (process.platform === 'darwin') {
-			const [state, ...argv] = execFileSync('ps', ['-p', String(pid), '-o', 'state=,args='], {
+			// execFileSync is absent from Harper's constrained child_process stub; execSync is the only sync
+			// option it keeps. Safe as a shell string here only because pid was checked an integer above.
+			const [state, ...argv] = execSync(`ps -p ${pid} -o state=,args=`, {
 				encoding: 'utf-8',
 				timeout: PS_TIMEOUT_MS,
 				stdio: ['ignore', 'pipe', 'ignore'],

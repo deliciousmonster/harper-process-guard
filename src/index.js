@@ -123,6 +123,8 @@ async function launchReaper(ctx, config) {
 				detached: true,
 				stdio: 'ignore',
 				...config.spawnOptions,
+				// Last, so a caller's own spawnOptions cannot shadow the identity Harper's spawn gate checks against.
+				name,
 			});
 			child.on('error', (error) => ctx.log.error(`process guard: the ${name} failed to execute: ${error.message}`));
 			state.started = true;

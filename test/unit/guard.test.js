@@ -122,6 +122,31 @@ test('the reaper is launched before any verify, so a host killed inside a probe 
 		})
 	));
 
+// Harper's real constrained spawn throws without options.name; a fake spawn accepts anything, which is
+// exactly how this went unnoticed until a real Harper node refused every spawn this package makes.
+test('every process guard spawns, including the reaper, names itself in the spawn options', () =>
+	withTempDir('guard-call-', (dir) =>
+		withSpawn(async ({ spawn, calls }) => {
+			const tag = `name-option-${process.pid}`;
+			const result = await guard({
+				pidDir: dir,
+				spawn,
+				reaper: { name: 'reaper', graceMs: 100 },
+				processes: [declare(tag, 'named-agent')],
+			});
+			try {
+				assert.equal(calls.length, 2, 'expected one spawn for the process and one for the reaper');
+				for (const call of calls) {
+					assert.ok(call.options.name, `${call.command} ${call.args.join(' ')} spawned with no name option`);
+				}
+				assert.deepEqual(calls.map((call) => call.options.name).sort(), ['named-agent', 'reaper'].sort());
+			} finally {
+				result.stop();
+				stopReaper(result.reaper);
+			}
+		})
+	));
+
 test('a host that refuses every command it is offered says so instead of failing quietly', () =>
 	withTempDir('guard-call-', (dir) =>
 		withSpawn(async ({ spawn }) => {

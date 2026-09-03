@@ -84,19 +84,19 @@ export function captureLog() {
  * a fake child has no pid the identification can read and no argv anything can be counted by.
  *
  * @template T
- * @param {(tools: { spawn: import('../../src/supervise.js').Spawn, calls: { command: string, args: string[] }[], children: import('node:child_process').ChildProcess[] }) => T | Promise<T>} run
+ * @param {(tools: { spawn: import('../../src/supervise.js').Spawn, calls: { command: string, args: string[], options: import('node:child_process').SpawnOptions & { name?: string } }[], children: import('node:child_process').ChildProcess[] }) => T | Promise<T>} run
  * @returns {Promise<Awaited<T>>}
  */
 export async function withSpawn(run) {
 	/** @type {import('node:child_process').ChildProcess[]} */
 	const children = [];
-	/** @type {{ command: string, args: string[] }[]} */
+	/** @type {{ command: string, args: string[], options: import('node:child_process').SpawnOptions & { name?: string } }[]} */
 	const calls = [];
 	/** @type {import('../../src/supervise.js').Spawn} */
 	const spawn = (command, args, options) => {
 		const child = realSpawn(command, args, options);
 		children.push(child);
-		calls.push({ command, args });
+		calls.push({ command, args, options });
 		return child;
 	};
 	try {
