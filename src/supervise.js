@@ -12,14 +12,14 @@ const DELIBERATE = new Set(['exit code 0', 'signal SIGTERM', 'signal SIGINT', 's
 
 /**
  * @typedef {object} Tuning
- * @property {number} joinedPollMs Liveness cadence for a joined pid. Not sub-second: this reports a death rather than reacting to one, and on darwin each check forks a `ps`.
+ * @property {number} deathPollMs Liveness cadence backing every watch. Not sub-second: this reports a death rather than reacting to one, and on darwin each check forks a `ps`.
  * @property {number} restartMax
  * @property {number} restartBaseMs
  * @property {number} restartCapMs
  */
 
 /** @type {Tuning} */
-export const DEFAULT_TUNING = { joinedPollMs: 2000, restartMax: 5, restartBaseMs: 1000, restartCapMs: 30_000 };
+export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs: 1000, restartCapMs: 30_000 };
 
 /** @typedef {import('node:child_process').ChildProcess} SpawnedChild */
 
@@ -92,7 +92,28 @@ function watchChild(child) {
 	});
 }
 
-/** A joined process hands over no child object, so liveness is the only signal there is. @param {number} pid @param {number} pollMs @returns {Promise<string>} */
+/** @param {number} ms @param {string} value @returns {Promise<string>} */
+function after(ms, value) {
+	return new Promise((resolve) => setTimeout(() => resolve(value), ms).unref());
+}
+
+// A host may hand back a wrapper for a process it already tracks rather than a ChildProcess, and such a
+// wrapper can emit 'exit' late or never. The poll is the backstop, and it yields because only the event
+// names an exit code; settling on the poll first would read a deliberate shutdown as a crash.
+/** @param {SpawnedChild} child @param {number} pid @param {number} pollMs @returns {Promise<string>} */
+function watchProcess(child, pid, pollMs) {
+	const event = typeof child?.on === 'function' ? watchChild(child) : null;
+	if (pid <= 0) {
+		if (!event) throw new Error('the spawned process reported neither a pid nor an exit event');
+		return event;
+	}
+	const backstop = watchPid(pid, pollMs).then((reason) =>
+		event ? Promise.race([event, after(pollMs, reason)]) : reason
+	);
+	return event ? Promise.race([event, backstop]) : backstop;
+}
+
+/** Liveness is the signal a joined process has, and the backstop for one this thread started. @param {number} pid @param {number} pollMs @returns {Promise<string>} */
 function watchPid(pid, pollMs) {
 	return new Promise((resolve) => {
 		const timer = setInterval(() => {
@@ -147,7 +168,7 @@ async function attempt(ctx, descriptor, state, restarts) {
 		ctx.log.info(
 			`process guard: the ${state.title} already runs on this node (pid ${claim.pid}); this thread joined it.`
 		);
-		void answerDeath(ctx, descriptor, state, restarts, watchPid(claim.pid, ctx.tuning.joinedPollMs), null);
+		void answerDeath(ctx, descriptor, state, restarts, watchPid(claim.pid, ctx.tuning.deathPollMs), null);
 		return;
 	}
 
@@ -175,7 +196,7 @@ async function attempt(ctx, descriptor, state, restarts) {
 
 	// Attached before anything else: an unhandled 'error' on a ChildProcess takes the worker thread down.
 	child.on('error', (error) => ctx.log.error(`process guard: the ${state.title} failed to execute: ${error.message}`));
-	const death = watchChild(child);
+	const death = watchProcess(child, child.pid ?? 0, ctx.tuning.deathPollMs);
 	state.pid = child.pid;
 	state.started = true;
 	state.adopted = false;

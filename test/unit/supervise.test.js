@@ -207,7 +207,7 @@ test('restarts are capped, and the report says what is missing from the node', (
 	withTempDir('guard-sup-', (dir) =>
 		withSpawn(async ({ spawn, calls }) => {
 			const ctx = context(dir, spawn, {
-				tuning: { joinedPollMs: 20, restartMax: 2, restartBaseMs: 5, restartCapMs: 5 },
+				tuning: { deathPollMs: 20, restartMax: 2, restartBaseMs: 5, restartCapMs: 5 },
 			});
 			try {
 				const state = await superviseProcess(ctx, descriptorFor('doomed', 'quits.js', ['9', '10']));
@@ -251,11 +251,39 @@ test('stopping supervision keeps a pending restart from firing', () =>
 	withTempDir('guard-sup-', (dir) =>
 		withSpawn(async ({ spawn, calls }) => {
 			const ctx = context(dir, spawn, {
-				tuning: { joinedPollMs: 20, restartMax: 5, restartBaseMs: 200, restartCapMs: 200 },
+				tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 200, restartCapMs: 200 },
 			});
 			await superviseProcess(ctx, descriptorFor('halted', 'quits.js', ['4', '20']));
 			ctx.run.stopping = true;
 			await new Promise((resolve) => setTimeout(resolve, 400));
 			assert.equal(calls.length, 1);
+		})
+	));
+
+// A host may hand back a wrapper for a process it already tracks rather than a ChildProcess. Such a
+// wrapper emits 'exit' from its own interval or not at all, and unref'ing one silenced an adopted
+// process for good on the previous line. The pid is the only field worth depending on.
+test('a spawn return that never emits exit is still answered, from the pid alone', () =>
+	withTempDir('guard-silent-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			const descriptor = descriptorFor('silent', 'idle.js');
+			const real = spawn(descriptor.binaryPath, [...descriptor.args], { stdio: 'ignore' });
+			const pid = pidOf(real);
+			await waitFor(() => argvOf(pid) !== null, 'the process to appear in the process table');
+
+			// Same pid, no exit event, ever.
+			const ctx = context(dir, () => /** @type {never} */ ({ pid, on() {} }), {
+				tuning: { deathPollMs: 20, restartMax: 0, restartBaseMs: 5, restartCapMs: 5 },
+			});
+			try {
+				const state = await superviseProcess(ctx, descriptor);
+				assert.equal(state.started, true);
+				real.kill('SIGKILL');
+				await waitFor(() => state.error !== undefined, 'the death to be answered');
+				assert.match(state.error ?? '', /liveness poll/, 'only the poll could have reported this death');
+			} finally {
+				ctx.run.stopping = true;
+				real.kill('SIGKILL');
+			}
 		})
 	));
