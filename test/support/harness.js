@@ -119,6 +119,7 @@ export async function withSpawn(run) {
  * @param {string} pidDir
  * @param {import('../../src/supervise.js').Spawn} spawn
  * @param {Omit<Partial<import('../../src/supervise.js').Context>, 'log'>} [overrides]
+ * @returns {import('../../src/supervise.js').Context}
  */
 export function context(pidDir, spawn, overrides = {}) {
 	return {
@@ -130,7 +131,7 @@ export function context(pidDir, spawn, overrides = {}) {
 		claimTimeoutMs: 5000,
 		report: [],
 		run: { stopping: false },
-		tuning: { joinedPollMs: 20, restartMax: 5, restartBaseMs: 10, restartCapMs: 40 },
+		tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 10, restartCapMs: 40 },
 		...overrides,
 	};
 }

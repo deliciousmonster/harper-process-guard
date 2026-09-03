@@ -1,8 +1,6 @@
 // @ts-check
-// One winner per node. Everything that decides the fate of a lock happens inside a gate only one thread
-// holds, and the lock itself is only ever REPLACED by rename, never removed and recreated. Check-then-
-// delete is two steps: a second thread's delete takes the file the winner just created, and both then
-// believe they hold it.
+// One winner per node. The lock is only ever REPLACED by rename, never removed then recreated: check-then-delete
+// is two steps, so a second thread can delete the winner's fresh file and both believe they hold it.
 import { linkSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -39,7 +37,7 @@ export function lockPath(pidDir, name) {
 }
 
 /** @param {string} path */
-function unlinkQuietly(path) {
+export function unlinkQuietly(path) {
 	try {
 		unlinkSync(path);
 	} catch {

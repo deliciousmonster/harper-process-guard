@@ -260,9 +260,8 @@ test('stopping supervision keeps a pending restart from firing', () =>
 		})
 	));
 
-// A host may hand back a wrapper for a process it already tracks rather than a ChildProcess. Such a
-// wrapper emits 'exit' from its own interval or not at all, and unref'ing one silenced an adopted
-// process for good on the previous line. The pid is the only field worth depending on.
+// A host may hand back a wrapper rather than a ChildProcess, whose 'exit' fires from its own interval or never-
+// unref'ing one silenced an adopted process's death for good before, so the pid is the only field worth depending on.
 test('a spawn return that never emits exit is still answered, from the pid alone', () =>
 	withTempDir('guard-silent-', (dir) =>
 		withSpawn(async ({ spawn }) => {

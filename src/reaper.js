@@ -1,13 +1,13 @@
 // @ts-check
 // A detached process, because nothing inside the host survives its death: there is no worker shutdown
 // hook, and SIGKILL fires no handler. Spawned by path, never imported.
-import { closeSync, openSync, readdirSync, unlinkSync, writeSync } from 'node:fs';
+import { closeSync, openSync, readdirSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
 import { errorMessage, identify, isAlive } from './identity.js';
-import { readLock } from './lock.js';
+import { readLock, unlinkQuietly } from './lock.js';
 
 const DEFAULT_WATCH_POLL_MS = 1000;
 const DEFAULT_TERM_GRACE_MS = 5000;
@@ -37,15 +37,6 @@ function log(options, message) {
 		}
 	} catch {
 		// A log that cannot be written must not stop the reaping, which is the job.
-	}
-}
-
-/** @param {string} path */
-function unlinkQuietly(path) {
-	try {
-		unlinkSync(path);
-	} catch {
-		// Absent is the outcome asked for.
 	}
 }
 

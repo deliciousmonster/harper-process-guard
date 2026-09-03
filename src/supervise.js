@@ -97,9 +97,8 @@ function after(ms, value) {
 	return new Promise((resolve) => setTimeout(() => resolve(value), ms).unref());
 }
 
-// A host may hand back a wrapper for a process it already tracks rather than a ChildProcess, and such a
-// wrapper can emit 'exit' late or never. The poll is the backstop, and it yields because only the event
-// names an exit code; settling on the poll first would read a deliberate shutdown as a crash.
+// A host may return a wrapper rather than a ChildProcess, whose 'exit' fires late or never- the poll backstops but
+// yields to the event alone naming an exit code, so reading it first would misread a deliberate shutdown as a crash.
 /** @param {SpawnedChild} child @param {number} pid @param {number} pollMs @returns {Promise<string>} */
 function watchProcess(child, pid, pollMs) {
 	const event = typeof child?.on === 'function' ? watchChild(child) : null;
