@@ -1,32 +1,97 @@
-// The stat line's comm field is chosen by the process being examined, so the parsing seam is
-// tested against hostile spellings; a real zombie lives in the e2e reaper suite.
-import test from 'node:test';
+// @ts-check
+// Identification decides what may be signalled, so every case here is about what the guard is allowed
+// to conclude, not about what it happens to read.
 import assert from 'node:assert/strict';
+import test from 'node:test';
 
-import { importDist } from '../support/harness.js';
+import { argvOf, compareArgv, identify, isAlive } from '../../src/identity.js';
+import { deadPid, fixture, pidOf, readyLine, waitFor, withSpawn } from '../support/harness.js';
 
-const { isAlive, parseProcStatState } = await importDist('identity.js');
-
-test('the stat state is the token after the LAST close paren, whatever comm contains', () => {
-	assert.equal(parseProcStatState('123 (node) S 1 123 123 0 -1'), 'S');
-	assert.equal(parseProcStatState('123 (node) Z 1 123 123 0 -1'), 'Z');
-	// comm is user-controlled and may contain spaces and parens; splitting on the FIRST ')'
-	// reads a letter out of the name instead of the state field.
-	assert.equal(parseProcStatState('42 (a) (b) R 0 42'), 'R', 'a ") (" inside comm broke the parse');
-	assert.equal(parseProcStatState('42 (tricky Z name) R 0 42'), 'R', 'a Z inside comm read as the state');
-	assert.equal(parseProcStatState('7 (ends)) Z 1'), 'Z', 'a comm ending in ")" broke the parse');
-	assert.equal(parseProcStatState('9 (spaced out comm (v2)) D 3'), 'D');
+test('pid 1 reads as alive, so a containerised host is not reaped on sight', () => {
+	// Inside a container the host process IS pid 1. A guard that treats 1 as an invalid pid stops it.
+	assert.equal(isAlive(1), true);
 });
 
-test('a stat line that does not parse yields null, never a guessed state', () => {
-	assert.equal(parseProcStatState(''), null);
-	assert.equal(parseProcStatState('no parens at all'), null);
-	assert.equal(parseProcStatState('1 (cut off)'), null, 'nothing after comm must not invent a state');
-	assert.equal(parseProcStatState('1 (cut off)   '), null);
+test('the pids that are not pids read as dead, because kill(2) reads them as process groups', () => {
+	assert.equal(isAlive(0), false, 'pid 0 is the caller’s own process group');
+	assert.equal(isAlive(-1), false, 'a negative is group -n');
+	assert.equal(isAlive(1.5), false);
+	assert.equal(isAlive(Number.NaN), false);
 });
 
-test('the examining process itself is alive; the group selectors still are not', () => {
-	assert.equal(isAlive(process.pid), true, 'the zombie check misread a running process');
-	assert.equal(isAlive(0), false);
-	assert.equal(isAlive(-1), false);
+test('a pid nothing holds reads as dead', async () => {
+	assert.equal(isAlive(await deadPid()), false);
+});
+
+test('two node scripts are told apart by argv, which is the only thing that separates them', () =>
+	withSpawn(async ({ spawn }) => {
+		// Both run the same executable: /proc/<pid>/exe resolves to the interpreter for each, so an
+		// identification by executable calls these one process. Only the command line separates them.
+		const first = [process.execPath, fixture('idle.js'), 'alpha'];
+		const second = [process.execPath, fixture('idle.js'), 'beta'];
+		const a = spawn(process.execPath, first.slice(1), { stdio: 'ignore' });
+		const b = spawn(process.execPath, second.slice(1), { stdio: 'ignore' });
+		await waitFor(() => argvOf(pidOf(a)) !== null && argvOf(pidOf(b)) !== null, 'both children to appear');
+
+		assert.equal(identify(pidOf(a), first), 'match');
+		assert.equal(identify(pidOf(b), second), 'match');
+		assert.equal(identify(pidOf(a), second), 'differs');
+		assert.equal(identify(pidOf(b), first), 'differs');
+		// The same executable for both, which is exactly why it identifies nothing.
+		assert.equal(argvOf(pidOf(a))?.[0], argvOf(pidOf(b))?.[0]);
+	}));
+
+test('a leading run matches, and pinning more of the command line can only narrow the verdict', () =>
+	withSpawn(async ({ spawn }) => {
+		const argv = [process.execPath, fixture('idle.js'), 'pinned', '--extra'];
+		const child = spawn(process.execPath, argv.slice(1), { stdio: 'ignore' });
+		await waitFor(() => argvOf(pidOf(child)) !== null, 'the child to appear');
+
+		assert.equal(identify(pidOf(child), argv.slice(0, 2)), 'match', 'a prefix must match');
+		assert.equal(identify(pidOf(child), argv), 'match', 'the whole vector must match');
+		assert.equal(identify(pidOf(child), [...argv, 'more']), 'differs', 'a longer expectation cannot match');
+	}));
+
+test('an empty expectation identifies nothing, so a lock with no recorded argv is never signalled', () => {
+	// The reaper reads argv off the lock. Were this 'match', a foreign pid file with no record would
+	// name a process the reaper then killed.
+	assert.equal(compareArgv(['/bin/anything'], []), 'unknown');
+	assert.equal(identify(process.pid, []), 'unknown');
+});
+
+test('a command line nothing can read is "cannot tell", never "not ours"', () => {
+	assert.equal(compareArgv(null, ['/bin/thing']), 'unknown');
+});
+
+test('a matching prefix must end on an argument boundary', () => {
+	assert.equal(compareArgv(['/bin/thing', '--config'], ['/bin/thing', '--conf']), 'differs');
+	assert.equal(compareArgv(['/bin/thing', '--conf', 'x'], ['/bin/thing', '--conf']), 'match');
+});
+
+test('a dead pid identifies as something else, so nothing acts on it as though it were still there', async () => {
+	assert.equal(identify(await deadPid(), [process.execPath]), 'differs');
+});
+
+test('a zombie is not alive: it holds its pid and answers kill(pid, 0), but runs nothing', async () => {
+	// `exec` replaces the shell, so the child it backgrounded is inherited by a process that never
+	// waits on it. That corpse is exactly what a non-reaping init leaves behind in a container.
+	await withSpawn(async ({ spawn }) => {
+		const parent = spawn('/bin/sh', ['-c', 'sleep 0.05 & echo $! ; exec sleep 30'], {
+			stdio: ['ignore', 'pipe', 'ignore'],
+		});
+		const printed = await readyLine(parent);
+		const zombie = Number(printed);
+		assert.ok(Number.isInteger(zombie) && zombie > 0, `the shell printed no pid: ${printed}`);
+
+		await waitFor(() => !isAlive(zombie), 'the backgrounded process to die and stay unreaped');
+		// Still a pid nobody has released: kill(pid, 0) succeeds where isAlive() does not.
+		let holdsPid = true;
+		try {
+			process.kill(zombie, 0);
+		} catch {
+			holdsPid = false;
+		}
+		assert.equal(holdsPid, true, 'the corpse was reaped before it could be observed');
+		assert.equal(isAlive(zombie), false);
+	});
 });

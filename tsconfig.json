@@ -1,29 +1,20 @@
 {
+	// Checks the source; it never compiles it. `noEmit` is the point: what ships is what is written.
 	"compilerOptions": {
 		"target": "ES2022",
 		"module": "NodeNext",
+		"moduleResolution": "NodeNext",
 		"lib": ["ES2022"],
-		// TS7 stops auto-including node_modules/@types; without "types": ["node"] every
-		// `process` reference dies on TS2591.
+		// TS7 stops auto-including node_modules/@types; without this every `process` reference dies on TS2591.
 		"types": ["node"],
-		"outDir": "./dist",
-		"rootDir": "./src",
+		"allowJs": true,
+		"checkJs": true,
+		"noEmit": true,
 		"strict": true,
 		"noUncheckedIndexedAccess": true,
 		"exactOptionalPropertyTypes": true,
-		"noImplicitOverride": true,
-		"isolatedModules": true,
-		"verbatimModuleSyntax": true,
-		"esModuleInterop": true,
 		"skipLibCheck": true,
-		"forceConsistentCasingInFileNames": true,
-		"declaration": true,
-		"declarationMap": true,
-		"sourceMap": true,
-		"moduleResolution": "NodeNext",
-		"resolveJsonModule": true,
-		"allowSyntheticDefaultImports": true
+		"forceConsistentCasingInFileNames": true
 	},
-	"include": ["src/**/*.ts"],
-	"exclude": ["node_modules", "dist", "test", "**/*.test.ts"]
+	"include": ["src/**/*.js", "scripts/**/*.js", "test/support/**/*.js"]
 }

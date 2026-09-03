@@ -1,14 +1,16 @@
 {
 	"name": "@deliciousmonster/harper-process-guard",
 	"version": "0.1.0",
-	"description": "Stale-lock repair and once-per-process coordination for Harper components that spawn long-lived child processes",
+	"description": "One winner per node for a long-lived child process: a compare-and-swap PID lock, identification by argv, supervision, and a reaper that outlives the host",
 	"keywords": [
-		"harper",
-		"harperdb",
 		"pid",
+		"pidfile",
+		"lock",
 		"supervisor",
 		"child-process",
-		"worker-threads"
+		"worker-threads",
+		"harper",
+		"harperdb"
 	],
 	"type": "module",
 	"license": "Apache-2.0",
@@ -16,14 +18,11 @@
 		"node": "^22.18.0 || >=24.0.0"
 	},
 	"exports": {
-		".": {
-			"types": "./dist/index.d.ts",
-			"default": "./dist/index.js"
-		},
+		".": "./src/index.js",
 		"./package.json": "./package.json"
 	},
 	"files": [
-		"dist/",
+		"src/",
 		"README.md"
 	],
 	"repository": {
@@ -35,14 +34,12 @@
 		"url": "https://github.com/deliciousmonster/harper-process-guard/issues"
 	},
 	"scripts": {
-		"build": "tsc",
-		"typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+		"typecheck": "tsc --noEmit",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"lint": "oxlint",
-		"test": "npm run build && node --test \"test/**/*.test.js\"",
-		"ci:local": "node scripts/ci-local.js",
-		"prepublishOnly": "npm run build"
+		"test": "node --test \"test/**/*.test.js\"",
+		"ci:local": "node scripts/ci-local.js"
 	},
 	"devDependencies": {
 		"@types/node": "^24.0.0",

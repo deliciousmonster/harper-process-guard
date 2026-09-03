@@ -1,36 +1,21 @@
 // @ts-check
-// Shared preamble for the hermetic suites under test/unit and test/e2e: repo root, manifest, temp dirs, dist copies.
+// Shared scaffolding: temp directories, real child processes, and a spawn that records what it was asked for.
+import { spawn as realSpawn, spawnSync as realSpawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import fs from 'node:fs';
-import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
 
 /** test/support sits two levels below the repo root. */
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
+export const FIXTURES = path.join(REPO_ROOT, 'test', 'fixtures');
+
+/** @param {string} name @returns {string} */
+export const fixture = (name) => path.join(FIXTURES, name);
 
 /**
- * The repo manifest; suites derive name and version from it so a re-scope
- * cannot leave tests passing against a stale scope.
- *
- * @type {{ name: string, version: string }}
- */
-export const PACKAGE_MANIFEST = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
-
-/**
- * Import from a built dist/ (this repo's, or a sandbox via `root`).
- * pathToFileURL: import() of a bare absolute path is rejected on Windows.
- *
- * @param {string} file
- * @param {string} [root]
- */
-export function importDist(file, root = REPO_ROOT) {
-	return import(pathToFileURL(path.join(root, 'dist', file)).href);
-}
-
-/**
- * mkdtemp with the path pre-resolved: macOS tmpdir sits behind /var -> /private/var,
- * and suites compare it to resolved spellings (ps output, a loaded module's __dirname).
+ * mkdtemp pre-resolved: the macOS tmpdir sits behind /var -> /private/var, and these suites compare
+ * paths against `ps` output, which is already resolved.
  *
  * @param {string} prefix
  */
@@ -39,8 +24,8 @@ export function makeTempDir(prefix) {
 }
 
 /**
- * A temp dir around `run`, removed however it ends. Tests must RETURN this
- * call: a fire-and-forget rejection is held by nobody and the test passes.
+ * A temp dir around `run`, removed however it ends. A test must RETURN this call: a fire-and-forget
+ * rejection is held by nobody and the test passes.
  *
  * @template T
  * @param {string} prefix
@@ -57,152 +42,130 @@ export async function withTempDir(prefix, run) {
 }
 
 /**
- * A throwaway copy of the built package with symlinked node_modules. The copied manifest carries
- * "type": "module" (else per-file syntax detection); `shadowed` leaves entries unlinked so a caller's stub wins over a real package.
+ * Poll `predicate` until it holds, or throw naming what never happened. Never returns false: a test
+ * that silently gave up would read as a pass.
  *
- * @param {{ prefix: string, include?: string[], shadowed?: string[] }} options
+ * @param {() => boolean | Promise<boolean>} predicate
+ * @param {string} what
+ * @param {{ timeoutMs?: number, intervalMs?: number }} [options]
  */
-export function createDistSandbox({ prefix, include = [], shadowed = [] }) {
-	const dir = makeTempDir(prefix);
-	for (const entry of ['dist', ...include]) {
-		fs.cpSync(path.join(REPO_ROOT, entry), path.join(dir, entry), {
-			recursive: true,
-		});
+export async function waitFor(predicate, what, { timeoutMs = 10_000, intervalMs = 10 } = {}) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		if (await predicate()) return;
+		if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
 	}
-	fs.copyFileSync(path.join(REPO_ROOT, 'package.json'), path.join(dir, 'package.json'));
+}
 
-	const targetModules = path.join(dir, 'node_modules');
-	fs.mkdirSync(targetModules, { recursive: true });
-	const sourceModules = path.join(REPO_ROOT, 'node_modules');
-	for (const entry of fs.readdirSync(sourceModules)) {
-		if (shadowed.includes(entry)) continue;
-		const source = path.join(sourceModules, entry);
-		if (!fs.statSync(source).isDirectory()) continue;
-		// "junction" is the only directory link Windows creates without elevation.
-		fs.symlinkSync(source, path.join(targetModules, entry), process.platform === 'win32' ? 'junction' : 'dir');
-	}
-	return dir;
+/** A pid nothing holds: a real process, run to completion and reaped, so the number was genuinely issued. */
+export async function deadPid() {
+	const child = realSpawn(process.execPath, ['-e', '0'], { stdio: 'ignore' });
+	await once(child, 'exit');
+	if (typeof child.pid !== 'number') throw new Error('the throwaway process reported no pid');
+	return child.pid;
+}
+
+/** Lines by level, so a test can assert what was said rather than that something was. */
+export function captureLog() {
+	/** @type {{ info: string[], warn: string[], error: string[] }} */
+	const lines = { info: [], warn: [], error: [] };
+	return {
+		lines,
+		all: () => [...lines.info, ...lines.warn, ...lines.error],
+		info: (/** @type {string} */ m) => lines.info.push(m),
+		warn: (/** @type {string} */ m) => lines.warn.push(m),
+		error: (/** @type {string} */ m) => lines.error.push(m),
+	};
 }
 
 /**
- * process.env[name] set (or removed when undefined) around `run`, restored
- * after. Unset and empty stay distinct: the launcher's fallbacks read the difference.
+ * Real children through a spawn that records its calls, all killed however `run` ends. Real, because
+ * a fake child has no pid the identification can read and no argv anything can be counted by.
  *
  * @template T
- * @param {string} name
- * @param {string | undefined} value
- * @param {() => T | Promise<T>} run
+ * @param {(tools: { spawn: import('../../src/supervise.js').Spawn, calls: { command: string, args: string[] }[], children: import('node:child_process').ChildProcess[] }) => T | Promise<T>} run
  * @returns {Promise<Awaited<T>>}
  */
-export async function withEnv(name, value, run) {
-	const previous = process.env[name];
-	if (value === undefined) delete process.env[name];
-	else process.env[name] = value;
+export async function withSpawn(run) {
+	/** @type {import('node:child_process').ChildProcess[]} */
+	const children = [];
+	/** @type {{ command: string, args: string[] }[]} */
+	const calls = [];
+	/** @type {import('../../src/supervise.js').Spawn} */
+	const spawn = (command, args, options) => {
+		const child = realSpawn(command, args, options);
+		children.push(child);
+		calls.push({ command, args });
+		return child;
+	};
 	try {
-		return await run();
+		return await run({ spawn, calls, children });
 	} finally {
-		if (previous === undefined) delete process.env[name];
-		else process.env[name] = previous;
-	}
-}
-
-/**
- * os.homedir() reads HOME on POSIX and USERPROFILE on Windows.
- *
- * @template T
- * @param {string} home
- * @param {() => T | Promise<T>} run
- */
-export function withHome(home, run) {
-	return withEnv('HOME', home, () => withEnv('USERPROFILE', home, run));
-}
-
-/**
- * `run` with console.warn captured, where this package's logger writes. Async
- * so one helper serves both sync and awaited callers.
- *
- * @param {() => unknown} run
- * @returns {Promise<string[]>}
- */
-export async function captureWarnings(run) {
-	/** @type {string[]} */
-	const warnings = [];
-	const realWarn = console.warn;
-	console.warn = (...args) => warnings.push(args.join(' '));
-	try {
-		await run();
-	} finally {
-		console.warn = realWarn;
-	}
-	return warnings;
-}
-
-/**
- * The one variable the receiver suites turn.
- *
- * @template T
- * @param {string | undefined} value
- * @param {() => T | Promise<T>} run
- */
-export const withReceiverPort = (value, run) => withEnv('DD_APM_RECEIVER_PORT', value, run);
-
-/**
- * `run` against a server listening on an ephemeral 127.0.0.1 port.
- *
- * @template T
- * @param {import('node:http').Server} server
- * @param {(port: number) => T | Promise<T>} run
- */
-export async function withServer(server, run) {
-	const port = await /** @type {Promise<number>} */ (
-		new Promise((resolve) =>
-			// The cast is safe: address() is an AddressInfo once listen() has called back on a TCP server.
-			server.listen(0, '127.0.0.1', () =>
-				resolve(/** @type {import('node:net').AddressInfo} */ (server.address()).port)
-			)
-		)
-	);
-	try {
-		return await run(port);
-	} finally {
-		await new Promise((resolve) => server.close(resolve));
-	}
-}
-
-/**
- * A receiver stub listening for the duration of `run`.
- *
- * @template T
- * @param {ReceiverStubOptions} options
- * @param {(port: number) => T | Promise<T>} run
- */
-export function withReceiver(options, run) {
-	return withServer(createReceiverStub(options), run);
-}
-
-/**
- * @typedef {object} ReceiverStubOptions
- * @property {number} [status]
- * @property {unknown} [body]
- * @property {string} [raw]
- * @property {string} [answers]
- */
-
-/**
- * An unstarted HTTP server answering only `answers`, 404ing the rest: a stub that answered
- * everything would let a probe-path typo pass. Unstarted because one caller defers the listen to prove the poller keeps polling.
- *
- * @param {ReceiverStubOptions} [options]
- */
-export function createReceiverStub({ status = 200, body = {}, raw, answers = '/info' } = {}) {
-	return http.createServer((request, response) => {
-		const head = { 'content-type': 'application/json' };
-		if (request.url !== answers) {
-			response.writeHead(404, head);
-			response.end('{}');
-			return;
+		for (const child of children) {
+			try {
+				child.kill('SIGKILL');
+			} catch {
+				// Already gone, which is the outcome asked for.
+			}
 		}
-		response.writeHead(status, head);
-		response.end(raw ?? JSON.stringify(body));
-	});
+	}
+}
+
+/**
+ * A supervise Context with the timings wound down, so a restart test measures the behaviour rather
+ * than the backoff schedule.
+ *
+ * @param {string} pidDir
+ * @param {import('../../src/supervise.js').Spawn} spawn
+ * @param {Omit<Partial<import('../../src/supervise.js').Context>, 'log'>} [overrides]
+ */
+export function context(pidDir, spawn, overrides = {}) {
+	return {
+		pidDir,
+		spawn,
+		version: 1,
+		stopOrphans: false,
+		log: captureLog(),
+		claimTimeoutMs: 5000,
+		report: [],
+		run: { stopping: false },
+		tuning: { joinedPollMs: 20, restartMax: 5, restartBaseMs: 10, restartCapMs: 40 },
+		...overrides,
+	};
+}
+
+/**
+ * A lock as this guard writes it: pid on line 1, version on line 2, the guard's own record on line 3.
+ * Written by hand rather than through the module under test, so a broken writer cannot seed a passing test.
+ *
+ * @param {string} file
+ * @param {{ pid: number, version?: number, token?: string, host?: number, argv?: readonly string[] }} lock
+ */
+export function seedLock(file, { pid, version = 1, token = 'seeded', host = 1, argv = [] }) {
+	fs.mkdirSync(path.dirname(file), { recursive: true });
+	fs.writeFileSync(file, `${pid}\n${version}\n${JSON.stringify({ token, host, argv })}\n`, 'utf-8');
+}
+
+/**
+ * How many processes on this machine are running exactly this command line. Counted from the process
+ * table rather than from the guard's own bookkeeping, because the bookkeeping is what is under test.
+ *
+ * @param {readonly string[]} argv
+ */
+export function countRunning(argv) {
+	const wanted = argv.join(' ');
+	const table = realSpawnSync('ps', ['-A', '-o', 'args='], { encoding: 'utf-8' }).stdout ?? '';
+	return table.split('\n').filter((line) => line.trim().replace(/\s+/g, ' ') === wanted).length;
+}
+
+/** The first line a fixture writes once it is doing its job, so nothing signals it too early. @param {import('node:child_process').ChildProcess} child */
+export function readyLine(child) {
+	return new Promise((resolve) => child.stdout?.once('data', (chunk) => resolve(String(chunk).trim())));
+}
+
+/** @param {import('node:child_process').ChildProcess} child */
+export function pidOf(child) {
+	if (typeof child.pid !== 'number') throw new Error('the child reported no pid');
+	return child.pid;
 }
