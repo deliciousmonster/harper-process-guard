@@ -1,67 +1,77 @@
 # AGENTS.md
 
-What to know before changing this repository. `README.md` is the documentation for people using
-the package; this file is for whoever is editing it.
+What to know before changing this repository. `README.md` documents the package for people using it;
+this file is for whoever is editing it.
 
 ## What the package is
 
-Process supervision for Harper components that spawn long-lived child processes. Harper adopts
-whatever holds a recycled pid, and gives its worker threads no primitive to agree on who does
-setup; any component that starts an agent, an exporter, a tunnel or a connection to something
-remote inherits both problems. The durable fix belongs upstream in Harper, and this package is
-the part a component can do for itself.
+One winner per node for a long-lived child process, generic over the binary and over the host. A
+host that runs many threads in one OS process and evaluates the same component on each of them
+spawns N copies of whatever that component starts, and gives those threads no primitive to agree on
+who does it. Harper v5 is the host this was built against; nothing under `src/` knows that, and a
+test asserts it stays that way.
 
 ## The rules that are load-bearing
 
-None of these are style, and README.md explains each at length:
+None of these are style, and README.md explains each:
 
-- Nothing is signalled without positive identification, and "cannot tell" never reads as "not
-  ours". macOS identification is argv-spoofable, so it may never authorise a signal.
-- The kill path (`stopOrphans`) is opt-in and off by default. Removing a stale lock signals
-  nothing and fixes the defect; a signal sent on a wrong identification cannot be taken back.
-- Process identity is read from the OS (`/proc/<pid>/stat` start time, `ps -o lstart=`), never
-  derived from wall-minus-monotonic clocks, which a clock step moves.
-- The reaper is spawned by path, never imported, and its rule is deliberately weaker than the
-  sweep's: where identification is unavailable it may signal only the pid it watched start.
-- The barrier holds every thread until the work finishes. Releasing losers early protects only
-  the winner.
+- The lock is decided inside a gate one thread holds at a time, and is only ever replaced by
+  `rename`. Check-then-delete is two steps, and the second thread's delete takes the file the winner
+  just created. Measured: 23 of 300 eight-thread races produced multiple winners that way.
+- Nothing is signalled without a positive identification, and "cannot tell" never reads as "not
+  ours". An empty expectation identifies nothing.
+- The kill path is opt-in and off by default: `stopOrphans`, and launching a reaper at all. Removing
+  a stale lock signals nothing and fixes the defect; a signal sent on a wrong identification cannot
+  be taken back.
+- Identity is the command line, never the executable: `/proc/<pid>/exe` resolves to the interpreter,
+  so it is identical for every node script on the box.
+- Pid 1 is a process. Inside a container it is usually the host, and treating it as an invalid pid
+  reaps a containerised host on sight.
+- The reaper removes a lock before signalling what it names, and it is spawned by path, never
+  imported.
+- `spawn` comes from the caller. That is what makes the guard testable with a fake and usable by a
+  host that constrains `child_process`.
 
-A green suite is not a review here. Each property above can be broken in ways the whole suite
-still passes, so a change to the semantics of once.ts, sweep.ts, or reaper.ts gets an
-adversarial review before merging.
+A green suite is not a review here. Each property above can be broken in ways a partial suite still
+passes, so a change to the semantics of `lock.js`, `supervise.js` or `reaper.js` gets an adversarial
+review, and a mutation run, before merging.
 
-## Layout and commands
+## Layout
 
-Sources under `src/`, compiled flat to `dist/` (rootDir is `src`, so `src/reaper.ts` emits as
-`dist/reaper.js`), tests under `test/`. `spawn.ts` is the orchestrator (spawn, adoption
-detection, respawn, reaper launch) and its one structural rule is that the constrained spawn
-comes FROM THE CALLER, because Harper grants it only to modules reached by relative import from
-the component entry and this package is loaded natively. Do not import child_process here for
-anything a component runs. `index.ts` composes it all into the one-call `bootstrap()`, whose
-ordering is load-bearing: resolve before the sweep (the sweep needs binary paths to adjudicate
-locks), configs after the barrier, the reaper before any verify (a probe can wait 30 seconds,
-and a node killed inside that window must not orphan the children). The lifecycle suite has a
-MUTATION test on each ordering. A spawn that fails the interception probe stops the lifecycle
-before the first `startProcess()`: without Harper's lock the count is one process per thread, so
-refusing is the behaviour rather than a fallback, and a MUTATION test holds it there. `bootstrap()` resolves its own `dist/reaper.js` through
-`import.meta.url`, so index.js and reaper.js must stay siblings in `dist/`. `npm test` builds
-first. `test/support/harness.js` is scaffolding shared by the suites.
+Five files under `src/`, plain ESM with `// @ts-check` and JSDoc:
 
-The e2e suite spawns real processes and real worker threads on purpose; a version that mocks
-them proves nothing about the interleavings this exists for. It runs on darwin and Linux, and
-several cases assert different outcomes per platform. That divergence is the design, not flake.
+- `identity.js` — one `inspect()` per pid answering liveness and command line together, because on
+  darwin each separate question costs a `ps` and these run on every poll.
+- `lock.js` — the gate, the adjudication, and the three writes (`claimLock`, `commitLock`,
+  `releaseLock`). `adjudicate()` reads the world and changes none of it, so the gate is held for a
+  read and a rename rather than for a signal and its grace period.
+- `supervise.js` — start or join, then watch, then answer the death by going back through the lock.
+- `reaper.js` — the detached script. Executed directly; its exports exist so a test can drive it
+  without spawning one.
+- `index.js` — `guard()` and `fingerprint()`, which is the whole public surface. The ordering inside
+  `guard()` is load-bearing: the reaper is launched before any `verify`, because a probe can wait 30
+  seconds and a host killed inside that window must not leave its processes behind. A mutation test
+  holds it there.
+
+Timings that a test needs to wind down live on the context (`tuning`) or in `ReaperOptions`, so no
+suite has to wait out a production backoff schedule.
+
+## Commands
+
+`npm test` runs `node --test` with no build. `npm run typecheck` is `tsc --noEmit` and never emits;
+there is no `dist/`, no build step and no runtime dependency, and `test/unit/package.test.js` fails
+if any of those change. `npm run ci:local` executes the test job's own steps, extracted from
+`test.yml` at run time, so the local gate and CI cannot drift; `test/unit/ci-local.test.js` pins the
+extraction and the excuse list.
+
+The suites spawn real processes and real worker threads. A fixture must not set `process.title`: the
+command line is how instances are identified and counted, and rewriting argv erases the only identity
+there is. A fixture that has to survive a signal announces itself on stdout first, because a process
+appears in the process table the instant it is exec'd, long before the script that handles the signal
+has run.
 
 ## Publishing
 
-Not yet. `package.json` carries `"private": true` under the name
-`@deliciousmonster/harper-process-guard`, and README.md ends with what has to be true before
-the private flag comes off.
-
-The path exists ahead of the decision. `publish.yml` fires only on a hand-pushed `v*` tag, runs
-the full test matrix first, and then refuses in two cases: while the private flag stands, and
-when the tag disagrees with the manifest version. The first guard is the point, because the
-flag is load-bearing and a tag pushed out of habit must bounce off it rather than ship.
-
-`npm run ci:local` executes the test job's own steps, extracted from `test.yml` at run time, so
-the local gate and CI cannot drift apart; `test/unit/ci-local.test.js` pins the extraction and
-the excuse list.
+`publish.yml` fires only on a hand-pushed `v*` tag, runs the full test matrix first, and refuses
+while `package.json` carries `"private": true` or when the tag disagrees with the manifest version.
+The tarball is the source, so there is no build to run before it.

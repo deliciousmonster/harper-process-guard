@@ -67,7 +67,7 @@ jobs:
             }
           '
 
-      # prepublishOnly runs the build, so the tarball carries a dist/ compiled from this checkout and nothing stale.
+      # There is no build: the tarball carries src/ as written, which is also what the matrix above ran.
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
