@@ -49,7 +49,9 @@ Five files under `src/`, plain ESM with `// @ts-check` and JSDoc:
   darwin each separate question costs a `ps` and these run on every poll.
 - `lock.js` — the gate, the adjudication, and the three writes (`claimLock`, `commitLock`,
   `releaseLock`). `adjudicate()` reads the world and changes none of it, so the gate is held for a
-  read and a rename rather than for a signal and its grace period.
+  read and a rename rather than for a signal and its grace period. `safeLockWrite` wraps every
+  `commitLock`/`releaseLock` call outside this file, turning a rejected write into a message instead
+  of an unhandled rejection.
 - `supervise.js` — start or join, then watch, then answer the death by going back through the lock.
 - `reaper.js` — the detached script. Executed directly; its exports exist so a test can drive it
   without spawning one.

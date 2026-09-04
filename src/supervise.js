@@ -208,8 +208,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 
 	// Attached before anything else: an unhandled 'error' on a ChildProcess takes the worker thread down.
 	child.on('error', (error) => ctx.log.error(`process guard: the ${state.title} failed to execute: ${error.message}`));
-	// A second 'exit' listener alongside watchChild's own; Node fires both. This is the only place a
-	// caller's exitDetail(code, signal) can ever be answered, since a joined process has no child to ask.
+	// A second 'exit' listener alongside watchChild's own; Node fires both. This is the only place
+	// state.code and state.signal are ever set, since a joined process has no child to ask.
 	child.on('exit', (code, signal) => {
 		state.code = code ?? undefined;
 		state.signal = signal ?? undefined;

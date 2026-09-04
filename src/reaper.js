@@ -113,7 +113,7 @@ function replacementPid(options) {
 /** Exported so a test can drive it without spawning one. @param {ReaperOptions} options */
 export async function run(options) {
 	log(options, `watching pid ${options.hostPid}; will stop what is locked under ${options.pidDir} when it goes.`);
-	while (isAlive(options.hostPid)) await delay(options.watchPollMs ?? DEFAULT_WATCH_POLL_MS);
+	await waitWhileAlive(options.hostPid, Infinity, options.watchPollMs ?? DEFAULT_WATCH_POLL_MS);
 	log(options, `pid ${options.hostPid} is gone`);
 
 	// A restart forks a replacement and exits the old host, so the processes are kept for it to adopt
