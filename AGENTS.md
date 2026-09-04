@@ -39,7 +39,10 @@ None of these are style, and README.md explains each:
 
 A green suite is not a review here. Each property above can be broken in ways a partial suite still
 passes, so a change to the semantics of `lock.js`, `supervise.js` or `reaper.js` gets an adversarial
-review, and a mutation run, before merging.
+review before merging, and each new or changed test gets mutation-checked by hand: revert the
+production change the test exists for, confirm the test goes red, restore it, confirm green. No
+mutation-testing tool is wired into this repo - `package.json` and `scripts/` carry none - so this is
+a manual step on the author, not something CI enforces.
 
 ## Layout
 
@@ -50,15 +53,18 @@ Five files under `src/`, plain ESM with `// @ts-check` and JSDoc:
 - `lock.js` — the gate, the adjudication, and the three writes (`claimLock`, `commitLock`,
   `releaseLock`). `adjudicate()` reads the world and changes none of it, so the gate is held for a
   read and a rename rather than for a signal and its grace period. `safeLockWrite` wraps every
-  `commitLock`/`releaseLock` call outside this file, turning a rejected write into a message instead
-  of an unhandled rejection.
+  `commitLock`/`releaseLock` call outside this file, turning a rejected write and a resolved `false`
+  (the token had already changed hands) alike into a message instead of a silent no-op or an
+  unhandled rejection.
 - `supervise.js` — start or join, then watch, then answer the death by going back through the lock.
 - `reaper.js` — the detached script. Executed directly; its exports exist so a test can drive it
-  without spawning one.
+  without spawning one. A SIGTERM or SIGINT sent to the reaper's own pid unlinks its self-lock before
+  exiting, same as its natural-completion paths do; Node's default handling of either signal would
+  otherwise kill it before that cleanup runs.
 - `index.js` — `guard()` and `fingerprint()`, which is the whole public surface. The ordering inside
   `guard()` is load-bearing: the reaper is launched before any `verify`, because a probe can wait 30
-  seconds and a host killed inside that window must not leave its processes behind. A mutation test
-  holds it there.
+  seconds and a host killed inside that window must not leave its processes behind. A test in
+  `guard.test.js` holds it there, mutation-checked by hand the same way as everything else here.
 
 Timings that a test needs to wind down live on the context (`tuning`) or in `ReaperOptions`, so no
 suite has to wait out a production backoff schedule.

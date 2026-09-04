@@ -288,14 +288,15 @@ export function releaseLock(path, token) {
 
 /**
  * Await a commitLock or releaseLock write that must never throw past this point: every caller sits
- * behind a fire-and-forget death handler or a catch block already reporting a different failure.
+ * behind a fire-and-forget death handler or a catch block already reporting a different failure. A
+ * resolved `false` is as much a failure as a throw: it means the token this caller held no longer
+ * matched what commitLock or releaseLock found on disk, so nothing was written.
  *
  * @param {Promise<boolean>} write @returns {Promise<string | undefined>} The failure message, or undefined.
  */
 export async function safeLockWrite(write) {
 	try {
-		await write;
-		return undefined;
+		return (await write) ? undefined : 'the lock changed hands before this write landed';
 	} catch (error) {
 		return errorMessage(error);
 	}

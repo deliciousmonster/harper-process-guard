@@ -173,6 +173,19 @@ export function parseArgs(argv) {
 	return options;
 }
 
+/**
+ * Node's default action for an unhandled SIGTERM or SIGINT kills this process before any of its own
+ * code runs, so without this handler a caller that signals the reaper directly - rather than waiting
+ * for it to notice hostPid is gone - leaves this reaper's own lock behind forever.
+ *
+ * @param {ReaperOptions} options @param {NodeJS.Signals} signal
+ */
+function stopOnSignal(options, signal) {
+	log(options, `received ${signal}; leaving its own lock for a replacement and exiting.`);
+	if (options.selfLock) unlinkQuietly(options.selfLock);
+	process.exit(0);
+}
+
 // Executed directly, which is how a host uses this. Guarded so the exports above stay importable by a
 // test without a reaper loop starting as a side effect.
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
@@ -182,6 +195,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
 		process.stderr.write('reaper: --host-pid must be a positive integer and --pid-dir must be given\n');
 		process.exit(2);
 	}
+	// Registered before run() starts waiting: a signal that lands during the wait is the case this exists for.
+	process.on('SIGTERM', () => stopOnSignal(options, 'SIGTERM'));
+	process.on('SIGINT', () => stopOnSignal(options, 'SIGINT'));
 	run(options).catch((/** @type {unknown} */ error) => {
 		process.stderr.write(`reaper: ${errorMessage(error)}\n`);
 		process.exit(1);

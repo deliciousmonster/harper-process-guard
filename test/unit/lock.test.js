@@ -7,7 +7,7 @@ import test from 'node:test';
 import { Worker } from 'node:worker_threads';
 
 import { argvOf } from '../../src/identity.js';
-import { claimLock, commitLock, lockPath, readLock, releaseLock } from '../../src/lock.js';
+import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from '../../src/lock.js';
 import { deadPid, fixture, pidOf, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
 
 const THREADS = 8;
@@ -253,6 +253,32 @@ test('releaseLock removes only its own lock', () =>
 		assert.equal(fs.existsSync(lockPath(dir, 'released')), true);
 		assert.equal(await releaseLock(lockPath(dir, 'released'), claim.token), true);
 		assert.equal(fs.existsSync(lockPath(dir, 'released')), false);
+	}));
+
+test('safeLockWrite reports a resolved false from commitLock, not the silent success a discarded boolean would read as', () =>
+	withTempDir('guard-lock-', async (dir) => {
+		const claim = await claimLock({ pidDir: dir, name: 'stolen', version: 1, argv: ['/bin/thing'] });
+		assert.equal(claim.outcome, 'won');
+		if (claim.outcome !== 'won') return;
+		// A real pre-set lock state, not a mock: some other real claimant already published under its own
+		// token, which is what commitLock's `held?.token !== token` guards against.
+		seedLock(lockPath(dir, 'stolen'), { pid: 4242, token: 'somebody-else', version: 1, argv: ['/bin/thing'] });
+
+		const failure = await safeLockWrite(commitLock(lockPath(dir, 'stolen'), claim.token, 777, 1, ['/bin/thing']));
+		assert.equal(failure, 'the lock changed hands before this write landed');
+		assert.equal(readLock(lockPath(dir, 'stolen'))?.pid, 4242, "a lost claimant's commit stamped the winner's lock");
+	}));
+
+test('safeLockWrite reports a resolved false from releaseLock the same way it reports a throw', () =>
+	withTempDir('guard-lock-', async (dir) => {
+		const claim = await claimLock({ pidDir: dir, name: 'moved-on', version: 1, argv: ['/bin/thing'] });
+		assert.equal(claim.outcome, 'won');
+		if (claim.outcome !== 'won') return;
+		seedLock(lockPath(dir, 'moved-on'), { pid: 4242, token: 'somebody-else', version: 1, argv: ['/bin/thing'] });
+
+		const failure = await safeLockWrite(releaseLock(lockPath(dir, 'moved-on'), claim.token));
+		assert.equal(failure, 'the lock changed hands before this write landed');
+		assert.equal(fs.existsSync(lockPath(dir, 'moved-on')), true, "a lost claimant's release removed the winner's lock");
 	}));
 
 test('a lock file with no guard record reads as a lock with no record, not as a parse failure', () =>
