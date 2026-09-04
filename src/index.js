@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { errorMessage } from './identity.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
-import { DEFAULT_TUNING, superviseProcess } from './supervise.js';
+import { DEFAULT_TUNING, startFailure, superviseProcess } from './supervise.js';
 
 /** @typedef {import('./supervise.js').GuardLog} GuardLog */
 /** @typedef {import('./supervise.js').ProcessState} ProcessState */
@@ -134,12 +134,21 @@ async function launchReaper(ctx, config) {
 				// Last, so a caller's own spawnOptions cannot shadow the identity Harper's spawn gate checks against.
 				name,
 			});
-			child.on('error', (error) => ctx.log.error(`process guard: the ${name} failed to execute: ${error.message}`));
+			// Only a child with a pid is running, so only its 'error' is a signal or a send failing.
+			child.on('error', (error) => {
+				if (child.pid) ctx.log.error(`process guard: the ${name} failed to execute: ${error.message}`);
+			});
+			// No pid means the spawn failed asynchronously, which never throws here. Recorded as started it
+			// pins the lock at pid 0 and skips the fallback command below, so the host leaves its processes.
+			if (!child.pid) {
+				refusals.push(`${command}: ${await startFailure(child)}`);
+				continue;
+			}
 			state.started = true;
 			state.pid = child.pid;
 			state.command = command;
 			const commitError = await safeLockWrite(
-				commitLock(lockPath(ctx.pidDir, name), claim.token, child.pid ?? 0, ctx.version, [command, ...args])
+				commitLock(lockPath(ctx.pidDir, name), claim.token, child.pid, ctx.version, [command, ...args])
 			);
 			if (commitError) {
 				state.error = `the ${name} lock could not be updated with its pid: ${commitError}`;

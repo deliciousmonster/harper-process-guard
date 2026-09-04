@@ -96,7 +96,7 @@ function watchChild(child) {
 }
 
 /** How spawn reports a failure it could only discover after returning. @param {SpawnedChild} child @returns {Promise<string>} */
-function startFailure(child) {
+export function startFailure(child) {
 	return new Promise((resolve) => child.once('error', (error) => resolve(error.message)));
 }
 

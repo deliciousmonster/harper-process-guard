@@ -173,6 +173,33 @@ test('a host that refuses every command it is offered says so instead of failing
 		})
 	));
 
+test('a reaper whose spawn fails after returning is reported, not recorded as watching', () =>
+	withTempDir('guard-call-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// The asynchronous twin of the refusal above: the host returns a child, then the exec fails, so
+			// nothing throws. Recorded as started it pins the lock at pid 0 and never tries the second command.
+			let spawned = 0;
+			const result = await guard({
+				pidDir: dir,
+				spawn: (command, args, options) =>
+					// The binary itself is missing, so the failure lands at exec and the child never gets a
+					// pid. A present interpreter given a missing script would spawn fine and fail later.
+					++spawned > 1 ? spawn(path.join(dir, 'no-such-interpreter'), args, options) : spawn(command, args, options),
+				reaper: { name: 'reaper', graceMs: 100 },
+				processes: [declare(`async-reaper-${process.pid}`)],
+			});
+			try {
+				assert.equal(result.reaper?.started, false, 'a reaper that never executed was reported as started');
+				assert.equal(result.reaper?.pid, undefined);
+				assert.match(result.reaper?.error ?? '', /ENOENT|Cannot find module/);
+				assert.match(result.report.join('\n'), /will keep running after this host stops/);
+				assert.equal(fs.existsSync(lockPath(dir, 'reaper')), false, 'the reaper lock was left pinned at pid 0');
+			} finally {
+				result.stop();
+			}
+		})
+	));
+
 test('a claimLock failure while launching the reaper does not take the already-started processes down with it', () =>
 	withTempDir('guard-call-', (dir) =>
 		withSpawn(async ({ spawn }) => {
