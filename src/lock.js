@@ -173,7 +173,7 @@ async function stopOrphan(pid, name, notes) {
  * @param {{ name: string, version: number, argv: readonly string[], stopOrphans: boolean, expired: boolean, notes: Set<string> }} against
  * @returns {{ act: 'take' | 'wait' } | { act: 'adopt' | 'stop', pid: number }}
  */
-export function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) {
+function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) {
 	if (!held) return { act: 'take' };
 
 	if (held.pid === 0) {

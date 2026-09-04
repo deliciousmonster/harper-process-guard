@@ -127,6 +127,21 @@ function watchPid(pid, pollMs) {
 	});
 }
 
+/** Every attempt-failure path: record the message on state, log it, and surface it on the caller's first try.
+ * @param {Context} ctx @param {ProcessState} state @param {number} restarts @param {string} message @param {string} [logMessage] Defaults to `message`; the spawn-refusal path appends its binary path. */
+function failAttempt(ctx, state, restarts, message, logMessage = message) {
+	state.error = message;
+	ctx.log.error(`process guard: ${logMessage}`);
+	if (restarts === 0) ctx.report.push(message);
+}
+
+/** Give back a claim after a failed attempt; a lock this thread never committed must not outlive it.
+ * @param {Context} ctx @param {Descriptor} descriptor @param {string} path @param {string} token */
+async function releaseClaim(ctx, descriptor, path, token) {
+	const releaseError = await safeLockWrite(releaseLock(path, token));
+	if (releaseError) ctx.log.error(`process guard: releasing the ${descriptor.name} lock also failed: ${releaseError}`);
+}
+
 /**
  * One turn of the lifecycle: settle the lock, then start or join, then watch. Resolves once the
  * process is running or has been refused; the watch that follows outlives this call.
@@ -155,9 +170,12 @@ async function attempt(ctx, descriptor, state, restarts) {
 			stopOrphans: ctx.stopOrphans,
 		});
 	} catch (error) {
-		state.error = `the ${descriptor.name} lock under ${ctx.pidDir} could not be taken: ${errorMessage(error)}`;
-		ctx.log.error(`process guard: ${state.error}`);
-		if (restarts === 0) ctx.report.push(state.error);
+		failAttempt(
+			ctx,
+			state,
+			restarts,
+			`the ${descriptor.name} lock under ${ctx.pidDir} could not be taken: ${errorMessage(error)}`
+		);
 		return;
 	}
 	for (const note of claim.notes) {
@@ -179,12 +197,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 	try {
 		preflight(descriptor.binaryPath);
 	} catch (error) {
-		state.error = `cannot start the ${state.title}: ${errorMessage(error)}`;
-		ctx.log.error(`process guard: ${state.error}`);
-		if (restarts === 0) ctx.report.push(state.error);
-		const releaseError = await safeLockWrite(releaseLock(path, claim.token));
-		if (releaseError)
-			ctx.log.error(`process guard: releasing the ${descriptor.name} lock also failed: ${releaseError}`);
+		failAttempt(ctx, state, restarts, `cannot start the ${state.title}: ${errorMessage(error)}`);
+		await releaseClaim(ctx, descriptor, path, claim.token);
 		return;
 	}
 
@@ -197,12 +211,9 @@ async function attempt(ctx, descriptor, state, restarts) {
 			name: descriptor.name,
 		});
 	} catch (error) {
-		state.error = `the spawn of the ${state.title} was refused: ${errorMessage(error)}`;
-		ctx.log.error(`process guard: ${state.error} (${descriptor.binaryPath})`);
-		if (restarts === 0) ctx.report.push(state.error);
-		const releaseError = await safeLockWrite(releaseLock(path, claim.token));
-		if (releaseError)
-			ctx.log.error(`process guard: releasing the ${descriptor.name} lock also failed: ${releaseError}`);
+		const message = `the spawn of the ${state.title} was refused: ${errorMessage(error)}`;
+		failAttempt(ctx, state, restarts, message, `${message} (${descriptor.binaryPath})`);
+		await releaseClaim(ctx, descriptor, path, claim.token);
 		return;
 	}
 
