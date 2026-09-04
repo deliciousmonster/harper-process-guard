@@ -94,32 +94,43 @@ test(
 				const host = spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
 				const started = JSON.parse(await readyLine(host));
 
-				assert.equal(started.reaper.started, true, `the reaper did not start: ${started.reaper.error}`);
-				assert.equal(fs.existsSync(lockPath(dir, 'reaper')), true);
+				try {
+					assert.equal(started.reaper.started, true, `the reaper did not start: ${started.reaper.error}`);
+					assert.equal(fs.existsSync(lockPath(dir, 'reaper')), true);
 
-				// The parent sees a pid the instant spawn() returns, well before the child has finished loading
-				// its own modules and registered a signal handler; its own first log line is what proves that
-				// happened, so a SIGTERM sent any earlier would race Node's own startup, not this test's subject.
-				const reaperLog = path.join(dir, 'reaper.log');
-				await waitFor(
-					() => fs.existsSync(reaperLog) && fs.readFileSync(reaperLog, 'utf-8').includes('watching pid'),
-					'the reaper to finish starting up'
-				);
+					// The parent sees a pid the instant spawn() returns, well before the child has finished loading
+					// its own modules and registered a signal handler; its own first log line is what proves that
+					// happened, so a SIGTERM sent any earlier would race Node's own startup, not this test's subject.
+					const reaperLog = path.join(dir, 'reaper.log');
+					await waitFor(
+						() => fs.existsSync(reaperLog) && fs.readFileSync(reaperLog, 'utf-8').includes('watching pid'),
+						'the reaper to finish starting up'
+					);
 
-				process.kill(started.reaper.pid, 'SIGTERM');
-				await waitFor(
-					() => !fs.existsSync(lockPath(dir, 'reaper')),
-					'the reaper to remove its own lock after SIGTERM',
-					{
-						timeoutMs: 10_000,
-						intervalMs: 50,
+					process.kill(started.reaper.pid, 'SIGTERM');
+					await waitFor(
+						() => !fs.existsSync(lockPath(dir, 'reaper')),
+						'the reaper to remove its own lock after SIGTERM',
+						{
+							timeoutMs: 10_000,
+							intervalMs: 50,
+						}
+					);
+
+					// The reaper was told to stop, not the host: hostPid never went, so nothing here should reap.
+					assert.equal(isAlive(host.pid ?? -1), true, 'the host was affected by a signal sent only to its reaper');
+					assert.equal(isAlive(started.guarded), true, 'the guarded process was reaped although its host is alive');
+					assert.equal(fs.existsSync(lockPath(dir, 'guarded')), true, "the guarded process's lock was removed");
+				} finally {
+					// The reaper that would normally do this is the one this test just stopped, and the guarded
+					// process is a plain (non-detached) child of `host`, so `host`'s own teardown in withSpawn's
+					// finally does not reap it either: nothing left running after this test cleans it up itself.
+					try {
+						process.kill(started.guarded, 'SIGKILL');
+					} catch {
+						// Already gone.
 					}
-				);
-
-				// The reaper was told to stop, not the host: hostPid never went, so nothing here should reap.
-				assert.equal(isAlive(host.pid ?? -1), true, 'the host was affected by a signal sent only to its reaper');
-				assert.equal(isAlive(started.guarded), true, 'the guarded process was reaped although its host is alive');
-				assert.equal(fs.existsSync(lockPath(dir, 'guarded')), true, "the guarded process's lock was removed");
+				}
 			})
 		)
 );
