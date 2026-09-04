@@ -1,6 +1,6 @@
 // @ts-check
-// What a thread does once the lock is settled. A thread that only joined still watches and still
-// answers a death, because a joiner that reports success and then supervises nothing is the defect.
+// What a thread does once the lock is settled. A thread that only joined still watches and still answers
+// a death, because reporting success and then supervising nothing is the defect, joined or started.
 import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -95,6 +95,11 @@ function watchChild(child) {
 	});
 }
 
+/** How spawn reports a failure it could only discover after returning. @param {SpawnedChild} child @returns {Promise<string>} */
+function startFailure(child) {
+	return new Promise((resolve) => child.once('error', (error) => resolve(error.message)));
+}
+
 /** @param {number} ms @param {string} value @returns {Promise<string>} */
 function after(ms, value) {
 	return new Promise((resolve) => setTimeout(() => resolve(value), ms).unref());
@@ -102,13 +107,9 @@ function after(ms, value) {
 
 // A host may return a wrapper rather than a ChildProcess, whose 'exit' fires late or never- the poll backstops but
 // yields to the event alone naming an exit code, so reading it first would misread a deliberate shutdown as a crash.
-/** @param {SpawnedChild} child @param {number} pid @param {number} pollMs @returns {Promise<string>} */
+/** @param {SpawnedChild} child @param {number} pid A pid that names a running process; a start without one never reaches here. @param {number} pollMs @returns {Promise<string>} */
 function watchProcess(child, pid, pollMs) {
 	const event = typeof child?.on === 'function' ? watchChild(child) : null;
-	if (pid <= 0) {
-		if (!event) throw new Error('the spawned process reported neither a pid nor an exit event');
-		return event;
-	}
 	const backstop = watchPid(pid, pollMs).then((reason) =>
 		event ? Promise.race([event, after(pollMs, reason)]) : reason
 	);
@@ -128,17 +129,17 @@ function watchPid(pid, pollMs) {
 }
 
 /** Every attempt-failure path: record the message on state, log it, and surface it on the caller's first try.
- * @param {Context} ctx @param {ProcessState} state @param {number} restarts @param {string} message @param {string} [logMessage] Defaults to `message`; the spawn-refusal path appends its binary path. */
-function failAttempt(ctx, state, restarts, message, logMessage = message) {
+ * @param {Context} ctx @param {ProcessState} state @param {string} message @param {string} [logMessage] Defaults to `message`; the start-failure paths append the binary path. */
+function failAttempt(ctx, state, message, logMessage = message) {
 	state.error = message;
 	ctx.log.error(`process guard: ${logMessage}`);
-	if (restarts === 0) ctx.report.push(message);
+	if (state.restarts === 0) ctx.report.push(message);
 }
 
 /** Give back a claim after a failed attempt; a lock this thread never committed must not outlive it.
- * @param {Context} ctx @param {Descriptor} descriptor @param {string} path @param {string} token */
-async function releaseClaim(ctx, descriptor, path, token) {
-	const releaseError = await safeLockWrite(releaseLock(path, token));
+ * @param {Context} ctx @param {Descriptor} descriptor @param {string} token */
+async function releaseClaim(ctx, descriptor, token) {
+	const releaseError = await safeLockWrite(releaseLock(lockPath(ctx.pidDir, descriptor.name), token));
 	if (releaseError) ctx.log.error(`process guard: releasing the ${descriptor.name} lock also failed: ${releaseError}`);
 }
 
@@ -157,7 +158,6 @@ async function attempt(ctx, descriptor, state, restarts) {
 	state.code = undefined;
 	state.signal = undefined;
 
-	const path = lockPath(ctx.pidDir, descriptor.name);
 	/** @type {import('./lock.js').Claim} */
 	let claim;
 	try {
@@ -173,7 +173,6 @@ async function attempt(ctx, descriptor, state, restarts) {
 		failAttempt(
 			ctx,
 			state,
-			restarts,
 			`the ${descriptor.name} lock under ${ctx.pidDir} could not be taken: ${errorMessage(error)}`
 		);
 		return;
@@ -197,8 +196,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 	try {
 		preflight(descriptor.binaryPath);
 	} catch (error) {
-		failAttempt(ctx, state, restarts, `cannot start the ${state.title}: ${errorMessage(error)}`);
-		await releaseClaim(ctx, descriptor, path, claim.token);
+		failAttempt(ctx, state, `cannot start the ${state.title}: ${errorMessage(error)}`);
+		await releaseClaim(ctx, descriptor, claim.token);
 		return;
 	}
 
@@ -212,24 +211,38 @@ async function attempt(ctx, descriptor, state, restarts) {
 		});
 	} catch (error) {
 		const message = `the spawn of the ${state.title} was refused: ${errorMessage(error)}`;
-		failAttempt(ctx, state, restarts, message, `${message} (${descriptor.binaryPath})`);
-		await releaseClaim(ctx, descriptor, path, claim.token);
+		failAttempt(ctx, state, message, `${message} (${descriptor.binaryPath})`);
+		await releaseClaim(ctx, descriptor, claim.token);
 		return;
 	}
 
 	// Attached before anything else: an unhandled 'error' on a ChildProcess takes the worker thread down.
-	child.on('error', (error) => ctx.log.error(`process guard: the ${state.title} failed to execute: ${error.message}`));
+	// Only a child with a pid is running, so only its 'error' is a kill or a send failing rather than a start.
+	child.on('error', (error) => {
+		if (child.pid) ctx.log.error(`process guard: the ${state.title} failed to execute: ${error.message}`);
+	});
+
+	// No pid means spawn failed after preflight passed- a bad shebang, a wrong-architecture binary, EAGAIN
+	// under fork pressure. It arrives as 'error' and never as an exit, so a start read here supervises nothing.
+	if (!child.pid) {
+		const message = `the ${state.title} failed to start: ${await startFailure(child)}`;
+		failAttempt(ctx, state, message, `${message} (${descriptor.binaryPath})`);
+		await releaseClaim(ctx, descriptor, claim.token);
+		return;
+	}
+
 	// A second 'exit' listener alongside watchChild's own; Node fires both. This is the only place
 	// state.code and state.signal are ever set, since a joined process has no child to ask.
 	child.on('exit', (code, signal) => {
 		state.code = code ?? undefined;
 		state.signal = signal ?? undefined;
 	});
-	const death = watchProcess(child, child.pid ?? 0, ctx.tuning.deathPollMs);
+	const death = watchProcess(child, child.pid, ctx.tuning.deathPollMs);
 	state.pid = child.pid;
 	state.started = true;
 	state.adopted = false;
-	const commitError = await safeLockWrite(commitLock(path, claim.token, child.pid ?? 0, ctx.version, descriptor.argv));
+	const path = lockPath(ctx.pidDir, descriptor.name);
+	const commitError = await safeLockWrite(commitLock(path, claim.token, child.pid, ctx.version, descriptor.argv));
 	if (commitError) {
 		state.error = `the ${descriptor.name} lock could not be updated with its pid: ${commitError}`;
 		ctx.log.error(`process guard: ${state.error}`);

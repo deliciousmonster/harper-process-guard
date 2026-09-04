@@ -3,6 +3,7 @@
 // restarts, a joiner reporting a dead process as healthy, and a process nobody stops.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 
 import { argvOf, isAlive } from '../../src/identity.js';
@@ -10,7 +11,7 @@ import { lockPath, readLock } from '../../src/lock.js';
 import { superviseProcess } from '../../src/supervise.js';
 import { context, fixture, pidOf, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
 
-/** @param {string} name @param {string} script @param {string[]} [args] */
+/** @param {string} name @param {string} script @param {string[]} [args] @returns {import('../../src/supervise.js').Descriptor} */
 function descriptorFor(name, script, args = []) {
 	const binaryPath = process.execPath;
 	const all = [fixture(script), ...args];
@@ -276,6 +277,41 @@ test('a binary that is not there is reported and its lock is not left behind', (
 			assert.match(state.error ?? '', /not-a-binary is missing/);
 			assert.equal(calls.length, 0);
 			assert.equal(fs.existsSync(lockPath(dir, 'absent')), false, 'a lock was left for a process that never started');
+		})
+	));
+
+test('a spawn that fails after preflight passed is answered, not reported as a start', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// Present and executable, so preflight passes, and unrunnable, so spawn fails the only way it can
+			// once it has returned: asynchronously, which is also how ENOEXEC and EAGAIN arrive.
+			const wrapper = path.join(dir, 'unrunnable.sh');
+			fs.writeFileSync(wrapper, '#!/nonexistent/interpreter\necho started\n', 'utf-8');
+			fs.chmodSync(wrapper, 0o755);
+			const ctx = context(dir, spawn);
+			try {
+				const state = await superviseProcess(ctx, {
+					name: 'unrunnable',
+					title: 'unrunnable thing',
+					binaryPath: wrapper,
+					args: [],
+					argv: [wrapper],
+					spawnOptions: { stdio: 'ignore' },
+				});
+
+				assert.equal(state.started, false, 'a spawn that never ran was reported as started');
+				assert.equal(state.pid, undefined);
+				assert.match(state.error ?? '', /the unrunnable thing failed to start: spawn .*unrunnable\.sh ENOENT/);
+				assert.deepEqual(ctx.report, [state.error], 'the caller was told nothing on the first attempt');
+				assert.equal(ctx.log.lines.error.length, 1, `one failure was logged as ${ctx.log.lines.error.length} lines`);
+				assert.equal(
+					fs.existsSync(lockPath(dir, 'unrunnable')),
+					false,
+					'the claim was left behind, pinning the lock at pid 0 under a live host'
+				);
+			} finally {
+				ctx.run.stopping = true;
+			}
 		})
 	));
 

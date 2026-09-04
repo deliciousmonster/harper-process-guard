@@ -87,6 +87,9 @@ export function isAlive(pid) {
 	return pid === process.pid || inspect(pid).alive;
 }
 
+/** Cadence for a wait measured in seconds: each pass costs a `ps` on darwin, so a tighter one buys nothing and forks hundreds of times. */
+export const STOP_POLL_MS = 50;
+
 /** Poll until `pid` is gone or `deadline` passes, whichever comes first. Shared so a caller's grace period is one loop, not one per caller. @param {number} pid @param {number} deadline @param {number} pollMs */
 export async function waitWhileAlive(pid, deadline, pollMs) {
 	while (Date.now() < deadline && isAlive(pid)) await delay(pollMs);

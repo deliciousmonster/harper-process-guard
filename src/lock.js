@@ -6,8 +6,9 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 
-import { errnoCode, errorMessage, identify, isAlive, waitWhileAlive } from './identity.js';
+import { errnoCode, errorMessage, identify, isAlive, STOP_POLL_MS, waitWhileAlive } from './identity.js';
 
+/** How long a thread waits before looking again at another thread's unfinished claim, which is one file read. */
 const POLL_MS = 2;
 /** The gate is held across a read and a rename and nothing else, so a live holder is never in it long. */
 const GATE_RETRY_MS = 1;
@@ -157,7 +158,7 @@ async function stopOrphan(pid, name, notes) {
 	} catch {
 		// ESRCH: it went between the identification and the signal, which is the outcome asked for.
 	}
-	await waitWhileAlive(pid, Date.now() + STOP_GRACE_MS, POLL_MS);
+	await waitWhileAlive(pid, Date.now() + STOP_GRACE_MS, STOP_POLL_MS);
 	notes.add(
 		isAlive(pid)
 			? `${name}: pid ${pid} did not exit after SIGTERM, so it may still hold what its replacement needs.`

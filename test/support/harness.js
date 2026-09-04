@@ -8,7 +8,7 @@ import path from 'node:path';
 
 /** test/support sits two levels below the repo root. */
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
-export const FIXTURES = path.join(REPO_ROOT, 'test', 'fixtures');
+const FIXTURES = path.join(REPO_ROOT, 'test', 'fixtures');
 
 /** @param {string} name @returns {string} */
 export const fixture = (name) => path.join(FIXTURES, name);
@@ -19,7 +19,7 @@ export const fixture = (name) => path.join(FIXTURES, name);
  *
  * @param {string} prefix
  */
-export function makeTempDir(prefix) {
+function makeTempDir(prefix) {
 	return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
 }
 
@@ -103,6 +103,9 @@ export async function withSpawn(run) {
 		return await run({ spawn, calls, children });
 	} finally {
 		for (const child of children) {
+			// Only one that started. A child whose spawn failed still holds a handle whose pid is 0, and
+			// libuv passes that straight to kill(2), which signals the whole process group- this runner included.
+			if (!child.pid) continue;
 			try {
 				child.kill('SIGKILL');
 			} catch {
@@ -119,7 +122,7 @@ export async function withSpawn(run) {
  * @param {string} pidDir
  * @param {import('../../src/supervise.js').Spawn} spawn
  * @param {Omit<Partial<import('../../src/supervise.js').Context>, 'log'>} [overrides]
- * @returns {import('../../src/supervise.js').Context}
+ * @returns {import('../../src/supervise.js').Context & { log: ReturnType<typeof captureLog> }}
  */
 export function context(pidDir, spawn, overrides = {}) {
 	return {

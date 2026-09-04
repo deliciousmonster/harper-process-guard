@@ -38,7 +38,7 @@ test('every source file is typechecked', () => {
 test('the source imports node: builtins and its own files, and nothing else', () => {
 	for (const file of sources) {
 		const text = fs.readFileSync(path.join(SRC, file), 'utf-8');
-		for (const [, specifier] of text.matchAll(/^import [^']*'([^']+)'/gm)) {
+		for (const [, specifier = ''] of text.matchAll(/^import [^']*'([^']+)'/gm)) {
 			assert.ok(
 				specifier.startsWith('node:') || specifier.startsWith('./'),
 				`src/${file} imports "${specifier}", which is neither a builtin nor a sibling`
