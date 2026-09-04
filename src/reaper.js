@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
-import { errorMessage, identify, isAlive } from './identity.js';
+import { errorMessage, identify, isAlive, waitWhileAlive } from './identity.js';
 import { readLock, unlinkQuietly } from './lock.js';
 
 const DEFAULT_WATCH_POLL_MS = 1000;
@@ -90,8 +90,7 @@ export async function reapTarget(options, target) {
 	}
 
 	const grace = options.termGraceMs ?? DEFAULT_TERM_GRACE_MS;
-	const deadline = Date.now() + grace;
-	while (Date.now() < deadline && isAlive(target.pid)) await delay(50);
+	await waitWhileAlive(target.pid, Date.now() + grace, 50);
 	if (!isAlive(target.pid)) return;
 
 	// SIGKILL reaches only a pid identified above; signalling an unnamed one would be this module's own defect.

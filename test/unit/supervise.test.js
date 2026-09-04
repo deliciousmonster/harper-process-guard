@@ -185,6 +185,30 @@ test('a clean exit is a shutdown, so it is not restarted and the lock goes', () 
 		})
 	));
 
+test('a lock-write failure while answering a deliberate exit is reported, never an unhandled rejection', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			const ctx = context(dir, spawn);
+			try {
+				const state = await superviseProcess(ctx, descriptorFor('locked-out', 'quits.js', ['0', '50']));
+				assert.equal(state.started, true);
+
+				// Write-proofed only once the start's own commit has already landed: it is releaseLock's gate
+				// write, made when the process answers its exit, that this test needs to fail.
+				fs.chmodSync(dir, 0o500);
+				try {
+					await waitFor(() => state.error !== undefined, 'the release failure to be reported on the state');
+					assert.match(state.error ?? '', /the locked-out lock could not be released after a deliberate stop/);
+					assert.match(ctx.log.lines.error.join('\n'), /could not be released after a deliberate stop/);
+				} finally {
+					fs.chmodSync(dir, 0o700);
+				}
+			} finally {
+				ctx.run.stopping = true;
+			}
+		})
+	));
+
 test('a stop signal is a shutdown too, and is not fought', () =>
 	withTempDir('guard-sup-', (dir) =>
 		withSpawn(async ({ spawn, calls }) => {
@@ -197,6 +221,26 @@ test('a stop signal is a shutdown too, and is not fought', () =>
 
 				assert.equal(calls.length, 1);
 				assert.equal(fs.existsSync(lockPath(dir, 'stopped')), false);
+			} finally {
+				ctx.run.stopping = true;
+			}
+		})
+	));
+
+test('a child this thread spawned records its exit code and signal on the state', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// restartMax: 0 so the state is read before a replacement's own exit could overwrite it.
+			const ctx = context(dir, spawn, {
+				tuning: { deathPollMs: 20, restartMax: 0, restartBaseMs: 5, restartCapMs: 5 },
+			});
+			try {
+				const state = await superviseProcess(ctx, descriptorFor('signalled', 'idle.js'));
+				process.kill(/** @type {number} */ (state.pid), 'SIGKILL');
+				await waitFor(() => state.exited, 'the SIGKILL to land');
+
+				assert.equal(state.signal, 'SIGKILL');
+				assert.equal(state.code, undefined);
 			} finally {
 				ctx.run.stopping = true;
 			}

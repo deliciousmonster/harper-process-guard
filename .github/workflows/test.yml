@@ -54,7 +54,7 @@ jobs:
       - name: Type check
         run: npm run typecheck
 
-      # `npm test` builds, then runs `node --test "test/**/*.test.js"`; the quotes make node expand the glob rather than the shell.
+      # `npm test` is `node --test "test/**/*.test.js"`, no build step; the quotes make node expand the glob rather than the shell.
       - name: Run npm test
         run: npm test
 

@@ -3,6 +3,7 @@
 // useless here: it resolves to the interpreter, so every node script on the box reads identical.
 import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { setTimeout as delay } from 'node:timers/promises';
 
 /**
  * What is known about a pid. 'unknown' is "not established", which is never "not ours".
@@ -84,6 +85,11 @@ function inspect(pid) {
 export function isAlive(pid) {
 	// A process cannot be a zombie to itself, and asking the OS costs a `ps` on every liveness poll.
 	return pid === process.pid || inspect(pid).alive;
+}
+
+/** Poll until `pid` is gone or `deadline` passes, whichever comes first. Shared so a caller's grace period is one loop, not one per caller. @param {number} pid @param {number} deadline @param {number} pollMs */
+export async function waitWhileAlive(pid, deadline, pollMs) {
+	while (Date.now() < deadline && isAlive(pid)) await delay(pollMs);
 }
 
 /** @param {number} pid @returns {string[] | null} */

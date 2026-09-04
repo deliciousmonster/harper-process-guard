@@ -5,7 +5,7 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { errorMessage, isAlive } from './identity.js';
-import { claimLock, commitLock, lockPath, releaseLock } from './lock.js';
+import { claimLock, commitLock, lockPath, releaseLock, safeLockWrite } from './lock.js';
 
 /** Exits that mean somebody shut it down. Restarting into one of these fights the operator. */
 const DELIBERATE = new Set(['exit code 0', 'signal SIGTERM', 'signal SIGINT', 'signal SIGHUP']);
@@ -61,6 +61,8 @@ export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs:
  * @property {string | undefined} [error]
  * @property {boolean} [verified] Set from the caller's verify().
  * @property {string | undefined} [verifyDetail]
+ * @property {number | undefined} [code] Exit code of a child this thread spawned. Unset for a joined process.
+ * @property {string | undefined} [signal] Signal that killed a child this thread spawned. Unset for a joined process.
  */
 
 /**
@@ -137,6 +139,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 	state.started = false;
 	state.pid = undefined;
 	state.error = undefined;
+	state.code = undefined;
+	state.signal = undefined;
 
 	const path = lockPath(ctx.pidDir, descriptor.name);
 	/** @type {import('./lock.js').Claim} */
@@ -178,7 +182,9 @@ async function attempt(ctx, descriptor, state, restarts) {
 		state.error = `cannot start the ${state.title}: ${errorMessage(error)}`;
 		ctx.log.error(`process guard: ${state.error}`);
 		if (restarts === 0) ctx.report.push(state.error);
-		await releaseLock(path, claim.token);
+		const releaseError = await safeLockWrite(releaseLock(path, claim.token));
+		if (releaseError)
+			ctx.log.error(`process guard: releasing the ${descriptor.name} lock also failed: ${releaseError}`);
 		return;
 	}
 
@@ -194,17 +200,29 @@ async function attempt(ctx, descriptor, state, restarts) {
 		state.error = `the spawn of the ${state.title} was refused: ${errorMessage(error)}`;
 		ctx.log.error(`process guard: ${state.error} (${descriptor.binaryPath})`);
 		if (restarts === 0) ctx.report.push(state.error);
-		await releaseLock(path, claim.token);
+		const releaseError = await safeLockWrite(releaseLock(path, claim.token));
+		if (releaseError)
+			ctx.log.error(`process guard: releasing the ${descriptor.name} lock also failed: ${releaseError}`);
 		return;
 	}
 
 	// Attached before anything else: an unhandled 'error' on a ChildProcess takes the worker thread down.
 	child.on('error', (error) => ctx.log.error(`process guard: the ${state.title} failed to execute: ${error.message}`));
+	// A second 'exit' listener alongside watchChild's own; Node fires both. This is the only place a
+	// caller's exitDetail(code, signal) can ever be answered, since a joined process has no child to ask.
+	child.on('exit', (code, signal) => {
+		state.code = code ?? undefined;
+		state.signal = signal ?? undefined;
+	});
 	const death = watchProcess(child, child.pid ?? 0, ctx.tuning.deathPollMs);
 	state.pid = child.pid;
 	state.started = true;
 	state.adopted = false;
-	await commitLock(path, claim.token, child.pid ?? 0, ctx.version, descriptor.argv);
+	const commitError = await safeLockWrite(commitLock(path, claim.token, child.pid ?? 0, ctx.version, descriptor.argv));
+	if (commitError) {
+		state.error = `the ${descriptor.name} lock could not be updated with its pid: ${commitError}`;
+		ctx.log.error(`process guard: ${state.error}`);
+	}
 	ctx.log.info(`process guard: started the ${state.title} (pid ${child.pid}): ${descriptor.argv.join(' ')}.`);
 	void answerDeath(ctx, descriptor, state, restarts, death, claim.token);
 }
@@ -226,7 +244,11 @@ async function answerDeath(ctx, descriptor, state, restarts, death, token) {
 	if (token !== null && DELIBERATE.has(cause)) {
 		// The owner keeps its lock across a crash, so a joiner can tell a death nobody answered from one
 		// already in hand. A deliberate stop is the one case where the lock goes.
-		await releaseLock(path, token);
+		const releaseError = await safeLockWrite(releaseLock(path, token));
+		if (releaseError) {
+			state.error = `the ${descriptor.name} lock could not be released after a deliberate stop: ${releaseError}`;
+			ctx.log.error(`process guard: ${state.error}`);
+		}
 		ctx.log.info(`process guard: the ${state.title} (pid ${state.pid}) was shut down (${cause}); not restarting it.`);
 		return;
 	}

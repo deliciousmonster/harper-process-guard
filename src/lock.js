@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 
-import { errnoCode, identify, isAlive } from './identity.js';
+import { errnoCode, errorMessage, identify, isAlive, waitWhileAlive } from './identity.js';
 
 const POLL_MS = 2;
 /** The gate is held across a read and a rename and nothing else, so a live holder is never in it long. */
@@ -157,8 +157,7 @@ async function stopOrphan(pid, name, notes) {
 	} catch {
 		// ESRCH: it went between the identification and the signal, which is the outcome asked for.
 	}
-	const deadline = Date.now() + STOP_GRACE_MS;
-	while (Date.now() < deadline && isAlive(pid)) await delay(POLL_MS);
+	await waitWhileAlive(pid, Date.now() + STOP_GRACE_MS, POLL_MS);
 	notes.add(
 		isAlive(pid)
 			? `${name}: pid ${pid} did not exit after SIGTERM, so it may still hold what its replacement needs.`
@@ -285,6 +284,21 @@ export function releaseLock(path, token) {
 		unlinkQuietly(path);
 		return true;
 	});
+}
+
+/**
+ * Await a commitLock or releaseLock write that must never throw past this point: every caller sits
+ * behind a fire-and-forget death handler or a catch block already reporting a different failure.
+ *
+ * @param {Promise<boolean>} write @returns {Promise<string | undefined>} The failure message, or undefined.
+ */
+export async function safeLockWrite(write) {
+	try {
+		await write;
+		return undefined;
+	} catch (error) {
+		return errorMessage(error);
+	}
 }
 
 /** @param {string} path @param {(held: Lock | null) => boolean} write @returns {Promise<boolean>} */

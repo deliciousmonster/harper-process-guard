@@ -173,6 +173,33 @@ test('a host that refuses every command it is offered says so instead of failing
 		})
 	));
 
+test('a claimLock failure while launching the reaper does not take the already-started processes down with it', () =>
+	withTempDir('guard-call-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// A directory sitting where the reaper's own lock file must go: claimLock reads it as unheld
+			// (readLock cannot open a directory as a file) and then tries to rename its claim onto it, which
+			// throws EISDIR - a real, non-EEXIST filesystem error claimLock cannot resolve on its own.
+			fs.mkdirSync(lockPath(dir, 'reaper'));
+			const result = await guard({
+				pidDir: dir,
+				spawn,
+				reaper: { name: 'reaper', graceMs: 100 },
+				processes: [declare(`reaper-lock-fail-${process.pid}`)],
+			});
+			try {
+				assert.equal(
+					result.processes[0]?.started,
+					true,
+					'the reaper lock failure took an already-started process down with it'
+				);
+				assert.equal(result.reaper?.started, false);
+				assert.match(result.reaper?.error ?? '', /EISDIR/);
+			} finally {
+				result.stop();
+			}
+		})
+	));
+
 test('a host that permits only a bare `node` gets one reaper, not one per caller', () =>
 	withTempDir('guard-call-', (dir) =>
 		withSpawn(async ({ spawn }) => {

@@ -8,9 +8,8 @@ import test from 'node:test';
 import { argvOf, compareArgv, identify, isAlive } from '../../src/identity.js';
 import { deadPid, fixture, pidOf, readyLine, waitFor, withSpawn } from '../support/harness.js';
 
-// Harper's real vm-current-context sandbox substitutes node:child_process with a stub exposing only
-// these five names; execFileSync silently isn't one, and a real Harper node refuses to load the
-// component that imports it rather than merely doing without it.
+// Harper's vm-current-context sandbox substitutes node:child_process with only these five names;
+// execFileSync isn't one, and a real Harper node refuses to load a component that imports it.
 const HARPER_CHILD_PROCESS_STUB = new Set(['exec', 'execFile', 'fork', 'spawn', 'execSync']);
 
 test('identity.js imports only what a real Harper node actually gives it from node:child_process', () => {

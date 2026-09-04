@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
 import { errorMessage } from './identity.js';
-import { claimLock, commitLock, lockPath, readLock, releaseLock } from './lock.js';
+import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 import { DEFAULT_TUNING, superviseProcess } from './supervise.js';
 
 /** @typedef {import('./supervise.js').GuardLog} GuardLog */
@@ -93,14 +93,22 @@ async function launchReaper(ctx, config) {
 	const recorded = held?.argv ?? [];
 	const sameReaper = recorded.length === args.length + 1 && args.every((arg, index) => recorded[index + 1] === arg);
 
-	const claim = await claimLock({
-		pidDir: ctx.pidDir,
-		name,
-		version: ctx.version,
-		argv: sameReaper ? recorded : [process.execPath, ...args],
-		timeoutMs: ctx.claimTimeoutMs,
-		stopOrphans: false,
-	});
+	/** @type {import('./lock.js').Claim} */
+	let claim;
+	try {
+		claim = await claimLock({
+			pidDir: ctx.pidDir,
+			name,
+			version: ctx.version,
+			argv: sameReaper ? recorded : [process.execPath, ...args],
+			timeoutMs: ctx.claimTimeoutMs,
+			stopOrphans: false,
+		});
+	} catch (error) {
+		state.error = `the ${name} lock under ${ctx.pidDir} could not be taken: ${errorMessage(error)}`;
+		ctx.log.error(`process guard: ${state.error}`);
+		return state;
+	}
 	for (const note of claim.notes) ctx.report.push(note);
 
 	if (claim.outcome === 'adopted') {
@@ -130,7 +138,13 @@ async function launchReaper(ctx, config) {
 			state.started = true;
 			state.pid = child.pid;
 			state.command = command;
-			await commitLock(lockPath(ctx.pidDir, name), claim.token, child.pid ?? 0, ctx.version, [command, ...args]);
+			const commitError = await safeLockWrite(
+				commitLock(lockPath(ctx.pidDir, name), claim.token, child.pid ?? 0, ctx.version, [command, ...args])
+			);
+			if (commitError) {
+				state.error = `the ${name} lock could not be updated with its pid: ${commitError}`;
+				ctx.log.error(`process guard: ${state.error}`);
+			}
 			child.unref();
 			ctx.log.info(`process guard: ${name} started (pid ${child.pid}), watching what is locked under ${ctx.pidDir}.`);
 			return state;
@@ -139,8 +153,9 @@ async function launchReaper(ctx, config) {
 		}
 	}
 
-	await releaseLock(lockPath(ctx.pidDir, name), claim.token);
+	const releaseError = await safeLockWrite(releaseLock(lockPath(ctx.pidDir, name), claim.token));
 	state.error = refusals.join('; ');
+	if (releaseError) state.error += `; releasing its lock also failed: ${releaseError}`;
 	const line =
 		`the ${name} could not be started (${state.error}), so the guarded processes will keep running ` +
 		`after this host stops. Permit ${process.execPath} or a bare \`node\` wherever this host filters spawns.`;
