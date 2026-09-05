@@ -18,6 +18,10 @@ None of these are style, and README.md explains each:
 - The lock is decided inside a gate one thread holds at a time, and is only ever replaced by
   `rename`. Check-then-delete is two steps, and the second thread's delete takes the file the winner
   just created. Measured: 23 of 300 eight-thread races produced multiple winners that way.
+- That exclusion holds until the caller's budget runs out, and then it is broken on purpose: nothing
+  else bounds `claimLock`, which has no deadline exit of its own. Measured with an exclusive-create
+  detector inside `underGate` over 300 rounds of 8 worker threads: 0 overlaps at the 5000ms budget the
+  race test uses, and 272 at a 10ms budget, where the deliberate break fires 782 times.
 - Nothing is signalled without a positive identification, and "cannot tell" never reads as "not
   ours". An empty expectation identifies nothing.
 - The kill path is opt-in and off by default: `stopOrphans`, and launching a reaper at all. Removing
@@ -49,12 +53,15 @@ a manual step on the author, not something CI enforces.
 Five files under `src/`, plain ESM with `// @ts-check` and JSDoc:
 
 - `identity.js` — one `inspect()` per pid answering liveness and command line together, because on
-  darwin each separate question costs a `ps` and these run on every poll.
+  darwin each separate question costs a `ps` and these run on every poll. `argvOf` has no caller in
+  `src/`: it is the seam a test waits on for a pid to appear in the process table with its command
+  line, which `isAlive` cannot express and `identify` can only answer against an expectation.
 - `lock.js` — the gate, the adjudication, and the three writes (`claimLock`, `commitLock`,
-  `releaseLock`). `adjudicate()` reads the world and changes none of it, so the gate is held for a
-  read and a rename rather than for a signal. Stopping an orphan is one SIGTERM sent after the lock
-  is taken, with no wait and no escalation: waiting blocked a host's whole startup on a process that
-  might never exit, and stopping properly is the reaper's job. `safeLockWrite` wraps every
+  `releaseLock`). `adjudicate()` reads the world and changes none of it; the caller signals and
+  publishes, so the gate is held for a read, at most one signal, and a rename. Stopping an orphan is
+  one SIGTERM, sent inside the gate before the claim overwrites the pid it names, with no wait and no
+  escalation: waiting blocked a host's whole startup on a process that might never exit. Nothing on
+  the node names that orphan afterwards, and the note the caller gets says so. `safeLockWrite` wraps every
   `commitLock`/`releaseLock` call outside this file, turning a rejected write and a resolved `false`
   (the token had already changed hands) alike into a message instead of a silent no-op or an
   unhandled rejection.

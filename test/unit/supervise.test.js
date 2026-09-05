@@ -8,7 +8,7 @@ import test from 'node:test';
 
 import { argvOf, isAlive } from '../../src/identity.js';
 import { lockPath, readLock } from '../../src/lock.js';
-import { superviseProcess } from '../../src/supervise.js';
+import { superviseProcess, watchPid } from '../../src/supervise.js';
 import { context, fixture, pidOf, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
 
 /** @param {string} name @param {string} script @param {string[]} [args] @returns {import('../../src/supervise.js').Descriptor} */
@@ -233,7 +233,7 @@ test('a child this thread spawned records its exit code and signal on the state'
 		withSpawn(async ({ spawn }) => {
 			// restartMax: 0 so the state is read before a replacement's own exit could overwrite it.
 			const ctx = context(dir, spawn, {
-				tuning: { deathPollMs: 20, restartMax: 0, restartBaseMs: 5, restartCapMs: 5 },
+				tuning: { deathPollMs: 20, restartMax: 0, restartBaseMs: 5 },
 			});
 			try {
 				const state = await superviseProcess(ctx, descriptorFor('signalled', 'idle.js'));
@@ -252,7 +252,7 @@ test('restarts are capped, and the report says what is missing from the node', (
 	withTempDir('guard-sup-', (dir) =>
 		withSpawn(async ({ spawn, calls }) => {
 			const ctx = context(dir, spawn, {
-				tuning: { deathPollMs: 20, restartMax: 2, restartBaseMs: 5, restartCapMs: 5 },
+				tuning: { deathPollMs: 20, restartMax: 2, restartBaseMs: 5 },
 			});
 			try {
 				const state = await superviseProcess(ctx, descriptorFor('doomed', 'quits.js', ['9', '10']));
@@ -419,11 +419,26 @@ test('a spawn the host refuses is reported and its lock is not left behind', () 
 		assert.equal(fs.existsSync(lockPath(dir, 'refused')), false);
 	}));
 
+test('stopping supervision ends the liveness poll, which nothing else would ever clear', async () => {
+	const ctx = context('/nothing-is-written-here', () => {
+		throw new Error('nothing is spawned here');
+	});
+	// A pid that outlives the test, so only stop() can settle this. The interval is unref'd and clears
+	// itself on a death alone, so without the check it forks a `ps` every tick for the life of the host.
+	const watch = watchPid(ctx, process.pid);
+	const raced = (/** @type {string} */ value) =>
+		Promise.race([watch, new Promise((resolve) => setTimeout(() => resolve(value), 300))]);
+
+	assert.equal(await raced('still polling'), 'still polling');
+	ctx.run.stopping = true;
+	assert.equal(await raced('still polling after the stop'), 'supervision stopped');
+});
+
 test('stopping supervision keeps a pending restart from firing', () =>
 	withTempDir('guard-sup-', (dir) =>
 		withSpawn(async ({ spawn, calls }) => {
 			const ctx = context(dir, spawn, {
-				tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 200, restartCapMs: 200 },
+				tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 200 },
 			});
 			await superviseProcess(ctx, descriptorFor('halted', 'quits.js', ['4', '20']));
 			ctx.run.stopping = true;
@@ -444,7 +459,7 @@ test('a spawn return that never emits exit is still answered, from the pid alone
 
 			// Same pid, no exit event, ever.
 			const ctx = context(dir, () => /** @type {never} */ ({ pid, on() {} }), {
-				tuning: { deathPollMs: 20, restartMax: 0, restartBaseMs: 5, restartCapMs: 5 },
+				tuning: { deathPollMs: 20, restartMax: 0, restartBaseMs: 5 },
 			});
 			try {
 				const state = await superviseProcess(ctx, descriptor);

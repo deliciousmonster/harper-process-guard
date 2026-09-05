@@ -74,12 +74,7 @@ export function collectTargets(options) {
  * @param {ReaperOptions} options @param {{ path: string; pid: number; argv: readonly string[] }} target
  */
 export async function reapTarget(options, target) {
-	if (target.pid <= 0) {
-		// A claim whose pid was never recorded: the host died between the spawn and the commit. The process
-		// it started is probably running, and this lock is the only trace of it left to warn anybody with.
-		log(options, `${target.path}: names no pid, so it is left in place (${target.argv.join(' ')})`);
-		return;
-	}
+	// A pid of 0 identifies as 'differs' rather than reaching kill(2), where it would name a process GROUP.
 	const verdict = identify(target.pid, target.argv);
 	unlinkQuietly(target.path);
 	if (verdict !== 'match') {
@@ -108,8 +103,11 @@ export async function reapTarget(options, target) {
 	}
 }
 
-/** The pid of a replacement host, or null. Never the process this was watching. @param {ReaperOptions} options */
-function replacementPid(options) {
+/** The pid of a replacement host, or null. Never the process this was watching: the OS can hand that pid
+ * to a stranger inside the grace window, and adopting it orphans the processes for good. Exported because
+ * run() reaches this only once hostPid is dead, so nothing else can drive the recycled case.
+ * @param {ReaperOptions} options */
+export function replacementPid(options) {
 	if (!options.replacementPidFile) return null;
 	const lock = readLock(options.replacementPidFile);
 	if (lock === null || lock.pid === options.hostPid || !isAlive(lock.pid)) return null;
@@ -158,12 +156,6 @@ export function parseArgs(argv) {
 				break;
 			case '--grace-ms':
 				options.graceMs = Number.parseInt(value, 10);
-				break;
-			case '--term-grace-ms':
-				options.termGraceMs = Number.parseInt(value, 10);
-				break;
-			case '--watch-poll-ms':
-				options.watchPollMs = Number.parseInt(value, 10);
 				break;
 			case '--replacement-pid-file':
 				options.replacementPidFile = value;

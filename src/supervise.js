@@ -18,11 +18,10 @@ const START_FAILURE_MS = 1000;
  * @property {number} deathPollMs Liveness cadence backing every watch. Not sub-second: this reports a death rather than reacting to one, and on darwin each check forks a `ps`.
  * @property {number} restartMax
  * @property {number} restartBaseMs
- * @property {number} restartCapMs
  */
 
 /** @type {Tuning} */
-export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs: 1000, restartCapMs: 30_000 };
+export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs: 1000 };
 
 /** @typedef {import('node:child_process').ChildProcess} SpawnedChild */
 
@@ -119,23 +118,27 @@ function after(ms, value) {
 
 // A host may return a wrapper rather than a ChildProcess, whose 'exit' fires late or never- the poll backstops but
 // yields to the event alone naming an exit code, so reading it first would misread a deliberate shutdown as a crash.
-/** @param {SpawnedChild} child @param {number} pid A pid that names a running process; a start without one never reaches here. @param {number} pollMs @returns {Promise<string>} */
-function watchProcess(child, pid, pollMs) {
+/** @param {Context} ctx @param {SpawnedChild} child @param {number} pid A pid that names a running process; a start without one never reaches here. @returns {Promise<string>} */
+function watchProcess(ctx, child, pid) {
 	const event = typeof child?.on === 'function' ? watchChild(child) : null;
-	const backstop = watchPid(pid, pollMs).then((reason) =>
-		event ? Promise.race([event, after(pollMs, reason)]) : reason
+	const backstop = watchPid(ctx, pid).then((reason) =>
+		event ? Promise.race([event, after(ctx.tuning.deathPollMs, reason)]) : reason
 	);
 	return event ? Promise.race([event, backstop]) : backstop;
 }
 
-/** Liveness is the signal a joined process has, and the backstop for one this thread started. @param {number} pid @param {number} pollMs @returns {Promise<string>} */
-function watchPid(pid, pollMs) {
+/** Liveness is the signal a joined process has, and the backstop for one this thread started. Exported so
+ * a test can drive the poll alone: inside a supervision tree nothing shows when the interval stops.
+ * @param {Context} ctx @param {number} pid @returns {Promise<string>} */
+export function watchPid(ctx, pid) {
 	return new Promise((resolve) => {
 		const timer = setInterval(() => {
-			if (isAlive(pid)) return;
+			// Stopping ends the poll: this handle is unref'd, so nothing else ever clears it, and each tick
+			// costs a `ps` on darwin for a process this thread no longer supervises.
+			if (!ctx.run.stopping && isAlive(pid)) return;
 			clearInterval(timer);
-			resolve('a liveness poll found the pid dead');
-		}, pollMs);
+			resolve(ctx.run.stopping ? 'supervision stopped' : 'a liveness poll found the pid dead');
+		}, ctx.tuning.deathPollMs);
 		timer.unref();
 	});
 }
@@ -210,7 +213,7 @@ async function attempt(ctx, descriptor, state, restarts) {
 		ctx.log.info(
 			`process guard: the ${state.title} already runs on this node (pid ${claim.pid}); this thread joined it.`
 		);
-		void answerDeath(ctx, descriptor, state, restarts, watchPid(claim.pid, ctx.tuning.deathPollMs), null);
+		void answerDeath(ctx, descriptor, state, restarts, watchPid(ctx, claim.pid), null);
 		return;
 	}
 
@@ -250,7 +253,7 @@ async function attempt(ctx, descriptor, state, restarts) {
 		state.code = code ?? undefined;
 		state.signal = signal ?? undefined;
 	});
-	const death = watchProcess(child, child.pid, ctx.tuning.deathPollMs);
+	const death = watchProcess(ctx, child, child.pid);
 	state.pid = child.pid;
 	state.started = true;
 	state.adopted = false;
@@ -315,7 +318,7 @@ async function answerDeath(ctx, descriptor, state, restarts, death, token) {
 		return;
 	}
 
-	const wait = Math.min(ctx.tuning.restartBaseMs * 2 ** restarts, ctx.tuning.restartCapMs);
+	const wait = ctx.tuning.restartBaseMs * 2 ** restarts;
 	ctx.log.warn(
 		`process guard: the ${state.title} (pid ${state.pid}) is gone (${cause}). Going back through the ` +
 			`lock in ${wait}ms: this thread restarts it if nothing else has, and joins it if something ` +

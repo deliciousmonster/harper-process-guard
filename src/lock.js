@@ -10,7 +10,7 @@ import { errnoCode, errorMessage, identify, isAlive } from './identity.js';
 
 /** How long a thread waits before looking again at another thread's unfinished claim, which is one file read. */
 const CLAIM_POLL_MS = 2;
-/** The gate is held across a read and a rename and nothing else, so a live holder is never in it long. */
+/** The gate is held across a read, at most one signal, and a rename, so a live holder is never in it long. */
 const GATE_RETRY_MS = 1;
 const GATE_WAIT_MS = 2000;
 const GATE_SUFFIX = '.claiming';
@@ -90,7 +90,13 @@ export function readLock(path) {
 function publish(path, lock) {
 	const temp = `${path}.${lock.token}.tmp`;
 	writeFileSync(temp, serialise(lock), 'utf-8');
-	renameSync(temp, path);
+	try {
+		renameSync(temp, path);
+	} catch (error) {
+		// A rename that failed leaves the temp where the pidDir keeps it forever, one per failed claim.
+		unlinkQuietly(temp);
+		throw error;
+	}
 }
 
 /**
@@ -114,14 +120,17 @@ function takeGate(path, expired) {
 		unlinkQuietly(temp);
 	}
 
-	let holder = 0;
+	/** @type {number | null} */
+	let holder = null;
 	try {
 		holder = Number.parseInt(readFileSync(gate, 'utf-8'), 10);
 	} catch {
-		// It went while being read, which is the outcome asked for.
+		// A gate that could not be read is "cannot tell", never "not ours": clearing one on a failed read
+		// takes the gate a second thread has linked since, and both then decide this lock at once.
 	}
-	// A gate whose holding process is gone, or one that outlived the caller's whole budget, is not a gate.
-	if (expired || !isAlive(holder)) unlinkQuietly(gate);
+	// A gate whose holder is positively dead is not a gate. `expired` breaks one deliberately, and is the
+	// only path left that can leave two threads inside; without it a gate nobody will release hangs the caller.
+	if (expired || (holder !== null && !isAlive(holder))) unlinkQuietly(gate);
 	return false;
 }
 
@@ -156,8 +165,8 @@ function signal(pid) {
 }
 
 /**
- * What to do about the lock as it stands. Reads the world and changes none of it, so the gate is held
- * for a read and a rename rather than for a signal.
+ * What to do about the lock as it stands. Reads the world and changes none of it: the caller signals and
+ * publishes, so every write to this lock stays in one place.
  *
  * @param {Lock | null} held
  * @param {{ name: string, version: number, argv: readonly string[], stopOrphans: boolean, expired: boolean, notes: Set<string> }} against
@@ -204,8 +213,8 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 		notes.add(`${orphan} stopOrphans is off, so it was left running and may still hold what its replacement needs.`);
 		return { act: 'take' };
 	}
-	// Nothing here waits for it or escalates: a grace period would block the caller's startup to pick a
-	// phrasing, and by any deadline the pid may name something else. Stopping properly is the reaper's job.
+	// One signal and no chase: a grace period would block the caller's startup, and by any deadline the pid
+	// may name something else. Nothing on this node names the orphan afterwards, which the note below says.
 	notes.add(
 		`${orphan} It was sent SIGTERM, which nothing here waits on: until it exits it may still hold what its ` +
 			`replacement needs, and nothing chases it if it ignores the signal.`
@@ -239,17 +248,17 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 		const expired = Date.now() >= deadline;
 		const verdict = underGate(path, expired, () => {
 			const decision = adjudicate(readLock(path), { name, version, argv, stopOrphans, expired, notes });
-			if (decision.act === 'take') publish(path, { pid: 0, version, token, host: process.pid, argv });
+			if (decision.act !== 'take') return decision;
+			// Signalled before the claim overwrites the pid it names, and inside the gate because that is
+			// what keeps a sibling thread from reading a dying pid and adopting a corpse.
+			if (decision.stop !== undefined) signal(decision.stop);
+			publish(path, { pid: 0, version, token, host: process.pid, argv });
 			return decision;
 		});
 
 		if (verdict === null) await delay(GATE_RETRY_MS);
-		else if (verdict.act === 'take') {
-			// After the gate, and after the lock is this claimant's: a thread that read a dying pid would
-			// adopt a corpse, where one that reads this claim waits for the process replacing it.
-			if (verdict.stop !== undefined) signal(verdict.stop);
-			return { outcome: 'won', token, notes: [...notes] };
-		} else if (verdict.act === 'adopt') return { outcome: 'adopted', pid: verdict.pid, notes: [...notes] };
+		else if (verdict.act === 'take') return { outcome: 'won', token, notes: [...notes] };
+		else if (verdict.act === 'adopt') return { outcome: 'adopted', pid: verdict.pid, notes: [...notes] };
 		else await delay(CLAIM_POLL_MS);
 	}
 }

@@ -67,8 +67,10 @@ Every decision about a lock happens inside a gate that one thread holds at a tim
 only ever replaced by `rename`, never removed and recreated. That matters because **`unlinkSync` is
 not a compare-and-swap**: measured, 23 of 300 eight-thread races over a stale lock produced more than
 one winner, every one of them because a second thread's delete took the file the winner had just
-created. `test/unit/lock.test.js` runs those 300 races on real worker threads; swap the gated
-replacement back to check-then-delete and it fails on the first round.
+created. `test/unit/lock.test.js` runs those 300 races on real worker threads, and what it measures is
+the pair: publish the replacement after the gate is released, or make the gate always grant, and it
+fails inside two rounds. Swapping `rename` for delete-then-create _inside_ the gate leaves it green,
+because holding the gate is what makes those two steps one.
 
 A claim reads pid 0 until the thread that took it names its process, so a thread that arrives in that
 window waits rather than racing. A claim whose holding process is gone, or that never finished inside

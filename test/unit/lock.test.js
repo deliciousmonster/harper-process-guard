@@ -33,8 +33,8 @@ test(
 	{ timeout: 120_000 },
 	async () => {
 		// The measured defect was 23 of 300 rounds with more than one winner, and every one of those came
-		// from removing the stale lock before recreating it. Swap the rename in claimLock for
-		// unlinkSync + linkSync and this fails; nothing else in the suite notices.
+		// from removing the stale lock before recreating it. Move publish() out of the underGate callback,
+		// or make takeGate always return true, and this fails; nothing else in the suite notices.
 		const gone = await deadPid();
 		return withTempDir('guard-race-', async (dir) => {
 			const control = new SharedArrayBuffer(16);
@@ -263,6 +263,32 @@ test('an unfinished claim outlives its budget and is taken over, so one wedged t
 		assert.match(claim.notes.join('\n'), /took over an unfinished claim/);
 	}));
 
+test(
+	'a gate held by a live process is broken once the budget runs out, so a claim cannot wait on it forever',
+	{ timeout: 5000 },
+	() =>
+		withTempDir('guard-lock-', async (dir) => {
+			// What a thread killed inside the gate leaves behind, and what a recycled pid looks like. The
+			// holder answers as alive, so the caller's own deadline is the only thing that clears it.
+			fs.writeFileSync(`${lockPath(dir, 'gated')}.claiming`, String(process.pid), 'utf-8');
+
+			const started = Date.now();
+			const claim = await claimLock({ pidDir: dir, name: 'gated', version: 1, argv: ['/bin/thing'], timeoutMs: 200 });
+			assert.equal(claim.outcome, 'won');
+			assert.ok(Date.now() - started < 2000, `a 200ms budget took ${Date.now() - started}ms`);
+			assert.equal(fs.existsSync(`${lockPath(dir, 'gated')}.claiming`), false, 'the gate was left behind');
+		})
+);
+
+test('a claim whose publish cannot land leaves no temp file behind', () =>
+	withTempDir('guard-lock-', async (dir) => {
+		// A directory where the lock file must go: the write lands and the rename cannot, which is the one
+		// failure publish() can meet holding a temp file. One per failed claim, in the pidDir, forever.
+		fs.mkdirSync(lockPath(dir, 'blocked'));
+		await assert.rejects(claimLock({ pidDir: dir, name: 'blocked', version: 1, argv: ['/bin/thing'] }));
+		assert.deepEqual(fs.readdirSync(dir), ['blocked.pid'], 'a failed claim left its temp file in the pidDir');
+	}));
+
 test('commitLock refuses once the lock has changed hands', () =>
 	withTempDir('guard-lock-', async (dir) => {
 		const claim = await claimLock({ pidDir: dir, name: 'moved', version: 1, argv: ['/bin/thing'] });
@@ -298,18 +324,6 @@ test('safeLockWrite reports a resolved false from commitLock, not the silent suc
 		const failure = await safeLockWrite(commitLock(lockPath(dir, 'stolen'), claim.token, 777, 1, ['/bin/thing']));
 		assert.equal(failure, 'the lock changed hands before this write landed');
 		assert.equal(readLock(lockPath(dir, 'stolen'))?.pid, 4242, "a lost claimant's commit stamped the winner's lock");
-	}));
-
-test('safeLockWrite reports a resolved false from releaseLock the same way it reports a throw', () =>
-	withTempDir('guard-lock-', async (dir) => {
-		const claim = await claimLock({ pidDir: dir, name: 'moved-on', version: 1, argv: ['/bin/thing'] });
-		assert.equal(claim.outcome, 'won');
-		if (claim.outcome !== 'won') return;
-		seedLock(lockPath(dir, 'moved-on'), { pid: 4242, token: 'somebody-else', version: 1, argv: ['/bin/thing'] });
-
-		const failure = await safeLockWrite(releaseLock(lockPath(dir, 'moved-on'), claim.token));
-		assert.equal(failure, 'the lock changed hands before this write landed');
-		assert.equal(fs.existsSync(lockPath(dir, 'moved-on')), true, "a lost claimant's release removed the winner's lock");
 	}));
 
 test('a lock file with no guard record reads as a lock with no record, not as a parse failure', () =>

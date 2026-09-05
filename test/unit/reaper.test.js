@@ -7,7 +7,7 @@ import test from 'node:test';
 
 import { argvOf, isAlive } from '../../src/identity.js';
 import { lockPath } from '../../src/lock.js';
-import { collectTargets, parseArgs, reapTarget, run } from '../../src/reaper.js';
+import { collectTargets, parseArgs, reapTarget, replacementPid, run } from '../../src/reaper.js';
 import { deadPid, fixture, pidOf, readyLine, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
 
 /** @param {string} dir @param {Partial<import('../../src/reaper.js').ReaperOptions>} [overrides] */
@@ -72,21 +72,17 @@ test('an identified process is stopped, and its lock goes before the signal does
 		})
 	));
 
-test('a lock that names no pid keeps it, because it is the only trace of a process that is probably running', () =>
+test('a lock that names no pid is removed, and the process it half-recorded is not signalled', () =>
 	withTempDir('guard-reap-', (dir) =>
 		withSpawn(async ({ spawn }) => {
 			// A host killed between the spawn and the commit: the process runs, and its lock still reads pid 0.
-			// Removing it leaves the next boot nothing to adopt, so it starts a second one against the first.
+			// Nothing reads that lock's argv to adopt what it names, so keeping it only leaves a lock behind.
 			const claimed = await running(spawn, 'never-committed');
 			seedLock(lockPath(dir, 'uncommitted'), { pid: 0, argv: claimed.argv });
 
 			await reapTarget(options(dir), collectTargets(options(dir))[0] ?? assert.fail('no target'));
-			assert.equal(
-				fs.existsSync(lockPath(dir, 'uncommitted')),
-				true,
-				'the only record of a live process was deleted for naming no pid'
-			);
-			assert.equal(isAlive(claimed.pid), true);
+			assert.equal(fs.existsSync(lockPath(dir, 'uncommitted')), false, 'a lock naming no pid was left behind');
+			assert.equal(isAlive(claimed.pid), true, 'pid 0 was signalled, which names this process group');
 		})
 	));
 
@@ -158,6 +154,31 @@ test('the replacement file naming the host that just died is not a replacement',
 		})
 	));
 
+test('only a live pid that is not the host that just died is read as a replacement', () =>
+	withTempDir('guard-reap-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// Both halves, because run() reaches this with the host already dead and cannot show either. The
+			// recycled-pid case is process.pid: isAlive answers true for it without a second process to keep up.
+			const hostFile = path.join(dir, 'host.pid');
+			const reaper = (/** @type {number} */ hostPid) =>
+				replacementPid(options(dir, { hostPid, replacementPidFile: hostFile }));
+
+			fs.writeFileSync(hostFile, `${process.pid}\n`);
+			assert.equal(
+				reaper(process.pid),
+				null,
+				"the old host's own pid, handed back out by the OS, read as a replacement"
+			);
+
+			fs.writeFileSync(hostFile, `${await deadPid()}\n`);
+			assert.equal(reaper(process.pid), null, 'a pid file an earlier host left behind read as a replacement');
+
+			const other = await running(spawn, 'a-real-replacement');
+			fs.writeFileSync(hostFile, `${other.pid}\n`);
+			assert.equal(reaper(process.pid), other.pid, 'a live replacement that is not the old host was refused');
+		})
+	));
+
 test('every flag is read, and one arriving without a value consumes nothing', () => {
 	assert.deepEqual(
 		parseArgs([
@@ -167,10 +188,6 @@ test('every flag is read, and one arriving without a value consumes nothing', ()
 			'/locks',
 			'--grace-ms',
 			'7',
-			'--term-grace-ms',
-			'8',
-			'--watch-poll-ms',
-			'9',
 			'--replacement-pid-file',
 			'/host.pid',
 			'--self-lock',
@@ -182,8 +199,6 @@ test('every flag is read, and one arriving without a value consumes nothing', ()
 			hostPid: 5,
 			pidDir: '/locks',
 			graceMs: 7,
-			termGraceMs: 8,
-			watchPollMs: 9,
 			replacementPidFile: '/host.pid',
 			selfLock: '/locks/self.pid',
 			logFile: '/reaper.log',

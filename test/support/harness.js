@@ -134,7 +134,7 @@ export function context(pidDir, spawn, overrides = {}) {
 		claimTimeoutMs: 5000,
 		report: [],
 		run: { stopping: false },
-		tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 10, restartCapMs: 40 },
+		tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 10 },
 		...overrides,
 	};
 }
