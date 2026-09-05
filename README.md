@@ -3,29 +3,30 @@
 [![Test](https://github.com/deliciousmonster/harper-process-guard/actions/workflows/test.yml/badge.svg)](https://github.com/deliciousmonster/harper-process-guard/actions/workflows/test.yml)
 
 One winner per node for a long-lived child process. A host that runs many threads in one OS process,
-and evaluates the same component on every one of them, spawns N copies of whatever that component
-starts unless something arbitrates. This is that arbiter: a PID lock with a real compare-and-swap
-behind it, identification by command line, supervision that survives losing the race, and a reaper
-that outlives the host.
+and evaluates the same component on every one of them, starts N copies of whatever that component
+spawns unless something arbitrates. This is that arbiter: one pid lock per process, decided under a
+file gate and identified by command line, plus a detached reaper for what a killed host leaves behind.
+Harper v5 is the host it was built against, whose `runOnMainThread` means "also on main" rather than
+"only once"; nothing in `src/` knows that, so any host of the same shape can use it.
 
-It imports `node:` builtins and nothing else, has no dependencies, and is not compiled: what is
-written is what ships.
-
-Harper v5 is the host this was built against, and its `runOnMainThread` means "also on main" rather
-than "only once", which is the shape of the problem. Nothing in `src/` knows that, and any host with
-the same shape can use it.
+It imports `node:` builtins and nothing else, and there is no build step: what is written is what
+ships. Node ^22.18 or >=24, on Linux or darwin. The identification everything here rests on has no
+third implementation, and Identity below says what that costs.
 
 ## Install
 
+Not on npm yet. Vendor the repository- the one consumer keeps it as a git submodule and imports
+`src/index.js` by path, which works because the checkout is the package.
+
 ```sh
-npm install @deliciousmonster/harper-process-guard
+git submodule add https://github.com/deliciousmonster/harper-process-guard.git guard
 ```
 
 ## Usage
 
 ```js
 import { spawn } from 'node:child_process';
-import { fingerprint, guard } from '@deliciousmonster/harper-process-guard';
+import { fingerprint, guard } from './guard/src/index.js';
 
 const status = await guard({
 	pidDir: `${rootPath}/pids`,
@@ -44,138 +45,138 @@ const status = await guard({
 });
 ```
 
-Every thread that reaches this call makes the same call. One of them starts the process; the rest
-join it and watch it. `status.processes` carries one state per declared process, `status.report` one
-line per thing the lock adjudication decided, and `status.stop()` halts supervision without
-signalling anything.
+Every thread that reaches this call makes the same call. One of them starts the process; the rest join
+it and watch it. The call resolves once every declared process is running or has been refused, which a
+contended lock can delay by as much as `claimTimeoutMs`.
 
-`spawn` is an argument rather than an import. That is what makes the guard testable against a fake
-and usable by a host that hands out a constrained `child_process` to modules it reached by relative
-import. Anything a particular host's spawn wrapper needs goes through `spawnOptions`, per process.
+- `status.processes`: one state per declared process, in declaration order, each mutated in place for
+  the life of the node, so a status endpoint can hold on to it.
+- `status.report`: what this thread's first attempt decided or refused, one line each. Adjudication
+  notes, a start that failed, a reaper that would not launch.
+- `status.reaper`: whether one is running, under which pid, and why not if not.
+- `status.stop()`: halts supervision, signalling nothing and releasing no lock, so nothing starts a
+  duplicate. Call it on reload: it also ends the liveness polls, which nothing else clears.
 
-The whole public surface is `guard` and `fingerprint`.
+`spawn` is an argument rather than an import, so a host that hands its modules a constrained
+`child_process` can pass its own. The whole public surface is `guard` and `fingerprint`, which hashes
+whatever forces a replacement into a positive integer inside 2^31, the number line 2 of the lock
+carries.
+
+| `guard({ ... })` | Default  |                                                                                             |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------- |
+| `pidDir`         | required | One `<name>.pid` per process. Give the guard a directory of its own; see the reaper.        |
+| `processes`      | required | `name`, `binaryPath`, `args`, and optionally `title`, `exitHint`, `spawnOptions`, `verify`. |
+| `spawn`          | required | The caller's own, called with `name` in its options for a host that gates spawns on one.    |
+| `version`        | `0`      | Line 2 of the lock. A process under a different one is an orphan, not something to adopt.   |
+| `stopOrphans`    | `false`  | Whether an identified orphan may be signalled.                                              |
+| `log`            | silent   | `info`, `warn`, `error`.                                                                    |
+| `claimTimeoutMs` | `30000`  | How long a claim waits on another thread's unfinished one.                                  |
+| `reaper`         | none     | `name`, `graceMs` (8000), `replacementPidFile`, `logFile`, `spawnOptions`. None without it. |
+
+`verify` runs once everything is up, the reaper included, and its verdict lands on the state; a throw
+is a failed verification rather than a failed start.
 
 ## What it does
 
 ### One winner per node
 
-The lock is `<pidDir>/<name>.pid`: pid on line 1, version fingerprint on line 2, and this guard's own
-record on line 3. A host that reads only the first two lines still reads it, and a pid file without
-line 3 is not one of these and is never acted on.
+The lock is `<pidDir>/<name>.pid`: pid on line 1, version fingerprint on line 2, this guard's own
+record on line 3. A host that reads only the first two lines still reads it. A pid file without line 3
+was written by something else, so the reaper skips it and nothing here signals the pid it names. The
+guard will still take that filename if you hand it that `name`, so give a process a name nothing else
+writes.
 
-Every decision about a lock happens inside a gate that one thread holds at a time, and the lock is
-only ever replaced by `rename`, never removed and recreated. That matters because **`unlinkSync` is
-not a compare-and-swap**: measured, 23 of 300 eight-thread races over a stale lock produced more than
-one winner, every one of them because a second thread's delete took the file the winner had just
-created. `test/unit/lock.test.js` runs those 300 races on real worker threads, and what it measures is
-the pair: publish the replacement after the gate is released, or make the gate always grant, and it
-fails inside two rounds. Swapping `rename` for delete-then-create _inside_ the gate leaves it green,
-because holding the gate is what makes those two steps one.
+Every decision about a lock is made inside a `<name>.pid.claiming` gate, and the lock itself is
+replaced by `rename`, so a reader outside the gate meets the old file or the new one rather than a
+half-written one. A lock is removed rather than replaced only where nothing should adopt what it
+named: a deliberate shutdown, a claim handed back after a start that failed, and the reaper.
 
 A claim reads pid 0 until the thread that took it names its process, so a thread that arrives in that
 window waits rather than racing. A claim whose holding process is gone, or that never finished inside
-the caller's budget, is taken over.
+the caller's budget, is taken over. A lock naming a dead pid is reclaimed, and a zombie counts as
+dead: it still answers `kill(pid, 0)` but runs nothing. **Pid 1 reads as alive**, because inside a
+container the host this guard watches usually is pid 1; only 0 and negatives are refused, since
+`kill(2)` reads those as process groups.
 
-A lock naming a dead pid is reclaimed. **Pid 1 reads as alive**, because inside a container the host
-this guard watches usually is pid 1; only 0 and negatives are refused, since `kill(2)` reads those as
-process groups. A zombie reads as dead: it still answers `kill(pid, 0)` but runs nothing, and a
-process reparented to a non-reaping init leaves exactly that.
+The exclusion is bounded rather than absolute. A thread whose `claimTimeoutMs` has run out breaks the
+gate deliberately: nothing else bounds a claim, and one that never returns takes the caller's whole
+startup with it. Two threads can then decide one lock, and the node can end up with two processes.
+Measured over 300 rounds of eight worker threads, at the 5000ms budget the race suite uses, no two
+were ever inside the gate together; at a 10ms budget that race produces two winners within a few
+rounds.
 
 ### Identity by command line
 
 `/proc/<pid>/exe` is kernel-set and unspoofable, and useless here: it resolves to the interpreter, so
-every node script on the box reads identical. Two node scripts proved indistinguishable by it and
-separable only by argv. So identity is `/proc/<pid>/cmdline` on Linux and `ps -o args=` on darwin,
-compared as a leading run of the process's own vector, which means pinning more of the command line
+every node script on the box reads identical. Identity is the command line instead: `/proc/<pid>/cmdline`
+on Linux, `ps` on darwin, compared as a leading run of the process's own vector, so pinning more of it
 can only ever narrow a verdict. An empty expectation identifies nothing.
 
-The caller supplies the argv, because the guard does not know what its consumer spawns.
-
-Verdicts are `match`, `differs` and `unknown`, and `unknown` never reads as `differs`. Nothing is
-signalled without a `match`.
+Nothing is signalled without a positive match. On a platform that is neither Linux nor darwin every
+pid reads as unidentifiable, so nothing is ever signalled there- and a thread will not join a process
+it cannot identify either. It takes the lock and starts its own. One winner per node is a Linux and
+darwin guarantee.
 
 ### Adoption, respawn, stopping
 
-A thread that joined a process it did not start still watches it, by polling the pid, because a
-joiner that reports success and then supervises nothing is a lie a status endpoint repeats.
+A thread that joined a process it did not start still watches it, by polling the pid every two
+seconds, because a joiner that reports success and then supervises nothing is a lie a status endpoint
+repeats.
 
-Every death goes back through the lock, whichever thread saw it. That one path answers all of it:
-the thread restarts a death nothing else has answered, and joins whatever another thread started if
-one got there first. The owner keeps its lock across a crash, which is how a joiner tells a death
-nobody owns from one already in hand; a deliberate shutdown (exit 0, SIGTERM, SIGINT, SIGHUP) is the
-one case where the lock goes and nothing is restarted.
+Every death goes back through the lock, whichever thread saw it. That one path answers all of it: the
+thread restarts a death nothing else has answered, and joins whatever another thread started if one
+got there first. The owner keeps its lock across a crash, which is how a joiner tells a death nobody
+owns from one already in hand; an owner that sees a deliberate exit (code 0, SIGTERM, SIGINT, SIGHUP)
+releases the lock and starts nothing. Restarts wait a second, then double, and stop after five; the
+cap lands on the log and on `state.error` as what is now missing from the node, not in the report,
+which only ever carries the first attempt. None of those numbers are options.
 
-With `stopOrphans` on, this guard is itself a source of SIGTERM, and the process that receives one
-cannot tell who sent it. The lock can: a thread that finds another token holding it reports the stop
-as the handoff it is, names the holder as the one starting the replacement, and leaves that thread's
-lock alone.
-
-Restarts back off and are capped, and the cap is reported as what is now missing from the node.
-
-### The reaper
-
-Nothing in-process runs when a host is killed rather than stopped: there is no worker shutdown hook
-and SIGKILL fires no handler. So the reaper is a detached process, spawned by path, that watches the
-host and stops what it locked once the host is gone.
-
-It is launched only when `reaper` is passed. **The kill path is opt-in**, here and in `stopOrphans`,
-because a guard that kills by default will one day kill something a consumer wanted alive. Without a
-reaper the processes outlive the host, and the next start reports them.
-
-The reaper removes a lock before signalling the process it names: a thread that reads a dying pid
-adopts a corpse and never retries, where one that finds nothing starts a replacement. It signals only
-what it can identify, and it leaves a lock that names no pid exactly where it is: that lock records a
-spawn whose pid was never committed, so removing it would discard the only trace of a process that is
-probably still running. Given `replacementPidFile`, a new host appearing inside the grace window keeps
-the processes for it to adopt, which is what a restart needs.
-
-It is spawned as `process.execPath` first and a bare `node` second. Harper's
-`applications.allowedSpawnCommands` defaults to `[npm, node]` and matches on
-`command.split(' ')[0]`, so a host that permits neither spelling gets a reaper that did not start,
-said so in the report, and left no lock behind.
+With `stopOrphans` on, this guard is itself a source of SIGTERM, and a process that receives one
+cannot tell who sent it. The lock can: a thread that finds another token holding it reports the stop as
+the handoff it is and leaves that lock alone.
 
 ### Orphans
 
 A live process whose lock carries this configuration is adopted. One whose version fingerprint or
-command line has moved is an orphan of an earlier release: the lock is taken, and the process is
-reported and left running unless `stopOrphans` is set, in which case the lock is taken and one SIGTERM
-sent in the same pass.
+command line has moved is an orphan of an earlier release: its lock is taken, and with `stopOrphans`
+set it is also sent one SIGTERM, in that same gated pass, ahead of the write that stops the lock
+naming it.
 
 Nothing waits for that signal and nothing escalates behind it. An orphan that ignores SIGTERM keeps
-running, its replacement fails to start against whatever it still holds, and the restart backoff is
-what retries; the note says exactly that rather than reporting a death nobody watched for. Waiting
-here would block the caller's whole startup to choose between two log phrasings, and by any deadline
-the pid may name something else anyway. Stopping a process properly - signal, grace, `SIGKILL` - is
-the reaper's job, and the reaper is the only thing here that does it.
+running and nothing here chases it; its replacement then starts against whatever it still holds, and
+the restart backoff is the only retry. The note says that, rather than reporting a death nobody
+watched for.
 
 The binary is checked before the lock is claimed, because claiming it is where an orphan gets
-signalled: a node that cannot start a replacement must not stop what it has. A spawn the host refuses
-cannot be caught that early, so that one case still gives up the claim after the fact.
+signalled: a node that cannot start a replacement must not stop what it has. A spawn cannot be checked
+that early, so a refusal and a return without a pid both give the claim back after the fact.
 
-## What is not here
+### The reaper
 
-`pollEndpoint` and `readHarperRootPath` were removed. Polling an HTTP endpoint has nothing to do with
-arbitrating a process, and `verify` is a callback the caller writes in a few lines; the one consumer
-that needs it keeps its own copy for reasons the guard cannot serve. Knowing how to parse
-`hdb_boot_properties.file` made this a Harper package rather than a process guard, and the caller
-already derives its own paths.
+Nothing in-process runs when a host is killed rather than stopped: there is no worker shutdown hook
+and SIGKILL fires no handler. So the reaper is a detached process, spawned by path, that polls the host
+pid once a second and stops what the guard locked once the host is gone. One per node; a thread that
+loses its lock joins the reaper that won it.
 
-The spawn-interception probe went with them. It existed because the old design leaned on Harper's
-constrained spawn to take the lock, so a spawn that was not Harper's meant no lock at all. This guard
-takes its own lock, so the premise is gone, and a probe that spawns a bogus command is a side effect
-a generic package should not have.
+It is launched only when `reaper` is passed. **The kill path is opt-in**, here and in `stopOrphans`,
+because a guard that kills by default will one day kill something a consumer wanted alive. Without a
+reaper the processes outlive the host, and the next start finds them through their locks.
+
+Once the host is gone it waits `graceMs` for a replacement to record itself in `replacementPidFile`,
+and leaves the processes for that host to adopt if one appears, which is what a restart needs.
+Otherwise it takes every lock in `pidDir` carrying a guard record, including locks this call never
+declared, which is why the directory should be the guard's alone. For each: remove the lock, then
+signal the pid only if its command line still matches. Removing first is deliberate, because a thread
+that reads a dying pid adopts a corpse and never retries, where one that finds nothing starts a
+replacement. A lock that never got past pid 0 goes the same way, and the process it half-recorded is
+left running. Whatever was signalled and is still alive five seconds later gets SIGKILL.
+
+It is spawned as `process.execPath` first and a bare `node` second, so a host that filters spawns has
+to permit one of those spellings. A host that permits neither gets a reaper that did not start, said
+so in the report, and left no lock behind.
 
 ## Development
 
-```sh
-npm test          # node --test, no build
-npm run typecheck # tsc --noEmit over JSDoc; it never compiles
-npm run lint
-npm run ci:local  # the Test workflow's own steps, extracted from test.yml at run time
-```
-
-`src/` is plain ESM with `// @ts-check` and JSDoc types. There is no `dist/`, no build step and no
-runtime dependency, and `test/unit/package.test.js` fails if any of those three change.
-
-The suites spawn real processes and real worker threads on purpose. The interleavings are the whole
-subject, and a version that mocks them proves nothing about any of them.
+`src/` is plain ESM with `// @ts-check` and JSDoc, and nothing here is built. `npm test` spawns real
+processes and real worker threads, and `npm run ci:local` runs the Test workflow's own steps against
+the working tree. `AGENTS.md` is what to read before changing any of it.
