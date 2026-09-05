@@ -5,10 +5,13 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { errorMessage, isAlive } from './identity.js';
-import { claimLock, commitLock, lockPath, releaseLock, safeLockWrite } from './lock.js';
+import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 
 /** Exits that mean somebody shut it down. Restarting into one of these fights the operator. */
 const DELIBERATE = new Set(['exit code 0', 'signal SIGTERM', 'signal SIGINT', 'signal SIGHUP']);
+
+/** How long a spawn that came back without a pid gets to say why. Bounded because this blocks a start. */
+const START_FAILURE_MS = 1000;
 
 /**
  * @typedef {object} Tuning
@@ -95,9 +98,18 @@ function watchChild(child) {
 	});
 }
 
-/** How spawn reports a failure it could only discover after returning. @param {SpawnedChild} child @returns {Promise<string>} */
+/**
+ * How spawn reports a failure it could only discover after returning. A real ChildProcess always emits
+ * 'error'; a host's wrapper owes nobody one, and this waits on a startup path holding an uncommitted claim.
+ *
+ * @param {SpawnedChild} child @returns {Promise<string>}
+ */
 export function startFailure(child) {
-	return new Promise((resolve) => child.once('error', (error) => resolve(error.message)));
+	if (typeof child?.once !== 'function') return Promise.resolve('it returned no pid, and it reports no errors');
+	return Promise.race([
+		new Promise((resolve) => child.once('error', (error) => resolve(error.message))),
+		after(START_FAILURE_MS, `it returned no pid, and reported no error within ${START_FAILURE_MS}ms`),
+	]);
 }
 
 /** @param {number} ms @param {string} value @returns {Promise<string>} */
@@ -144,8 +156,8 @@ async function releaseClaim(ctx, descriptor, token) {
 }
 
 /**
- * One turn of the lifecycle: settle the lock, then start or join, then watch. Resolves once the
- * process is running or has been refused; the watch that follows outlives this call.
+ * One turn of the lifecycle: refuse a start that cannot happen, settle the lock, then start or join,
+ * then watch. Resolves once the process is running or has been refused; the watch outlives this call.
  *
  * @param {Context} ctx @param {Descriptor} descriptor @param {ProcessState} state @param {number} restarts
  */
@@ -157,6 +169,15 @@ async function attempt(ctx, descriptor, state, restarts) {
 	state.error = undefined;
 	state.code = undefined;
 	state.signal = undefined;
+
+	// Before the lock, because claiming it is where an orphan gets signalled: a node that cannot start a
+	// replacement must not stop what it has. The spawn refusal below cannot be hoisted the same way.
+	try {
+		preflight(descriptor.binaryPath);
+	} catch (error) {
+		failAttempt(ctx, state, `cannot start the ${state.title}: ${errorMessage(error)}`);
+		return;
+	}
 
 	/** @type {import('./lock.js').Claim} */
 	let claim;
@@ -190,14 +211,6 @@ async function attempt(ctx, descriptor, state, restarts) {
 			`process guard: the ${state.title} already runs on this node (pid ${claim.pid}); this thread joined it.`
 		);
 		void answerDeath(ctx, descriptor, state, restarts, watchPid(claim.pid, ctx.tuning.deathPollMs), null);
-		return;
-	}
-
-	try {
-		preflight(descriptor.binaryPath);
-	} catch (error) {
-		failAttempt(ctx, state, `cannot start the ${state.title}: ${errorMessage(error)}`);
-		await releaseClaim(ctx, descriptor, claim.token);
 		return;
 	}
 
@@ -266,6 +279,16 @@ async function answerDeath(ctx, descriptor, state, restarts, death, token) {
 	const hint = cause.startsWith('exit code') && descriptor.exitHint ? ` ${descriptor.exitHint}` : '';
 
 	if (token !== null && DELIBERATE.has(cause)) {
+		// This guard sends SIGTERM itself when it stops an orphan, so a signal alone cannot tell an operator
+		// from a sibling thread. The lock can: another token holds it only because that thread took it first.
+		const holder = readLock(path);
+		if (holder !== null && holder.token !== token) {
+			ctx.log.warn(
+				`process guard: the ${state.title} (pid ${state.pid}) was stopped (${cause}) by whatever now holds ` +
+					`the ${descriptor.name} lock, not by an operator; that thread is starting its replacement.`
+			);
+			return;
+		}
 		// The owner keeps its lock across a crash, so a joiner can tell a death nobody answered from one
 		// already in hand. A deliberate stop is the one case where the lock goes.
 		const releaseError = await safeLockWrite(releaseLock(path, token));

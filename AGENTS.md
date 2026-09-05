@@ -52,7 +52,9 @@ Five files under `src/`, plain ESM with `// @ts-check` and JSDoc:
   darwin each separate question costs a `ps` and these run on every poll.
 - `lock.js` — the gate, the adjudication, and the three writes (`claimLock`, `commitLock`,
   `releaseLock`). `adjudicate()` reads the world and changes none of it, so the gate is held for a
-  read and a rename rather than for a signal and its grace period. `safeLockWrite` wraps every
+  read and a rename rather than for a signal. Stopping an orphan is one SIGTERM sent after the lock
+  is taken, with no wait and no escalation: waiting blocked a host's whole startup on a process that
+  might never exit, and stopping properly is the reaper's job. `safeLockWrite` wraps every
   `commitLock`/`releaseLock` call outside this file, turning a rejected write and a resolved `false`
   (the token had already changed hands) alike into a message instead of a silent no-op or an
   unhandled rejection.

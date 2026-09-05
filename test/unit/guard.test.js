@@ -200,6 +200,37 @@ test('a reaper whose spawn fails after returning is reported, not recorded as wa
 		})
 	));
 
+test('a reaper whose first command fails after returning falls back to the second, which is why the loop exists', () =>
+	withTempDir('guard-call-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// process.execPath comes back as a child with no pid and reports through 'error', never a throw,
+			// which is the shape the synchronous-refusal test above cannot produce. A host that would have
+			// accepted a bare `node` must still end up with a reaper.
+			const log = captureLog();
+			const result = await guard({
+				pidDir: dir,
+				spawn: (command, args, options) =>
+					command === process.execPath && args[0] === REAPER_SCRIPT
+						? spawn(path.join(dir, 'no-such-interpreter'), args, options)
+						: spawn(command, args, options),
+				log,
+				reaper: { name: 'reaper', graceMs: 100 },
+				processes: [declare(`fallback-reaper-${process.pid}`)],
+			});
+			try {
+				assert.equal(result.reaper?.started, true, `the fallback was never reached: ${result.reaper?.error}`);
+				assert.equal(result.reaper?.command, 'node');
+				assert.equal(isAlive(/** @type {number} */ (result.reaper?.pid)), true);
+				assert.equal(readLock(lockPath(dir, 'reaper'))?.pid, result.reaper?.pid, 'the lock kept the refused attempt');
+				// The refused candidate had no pid, so its 'error' is the spawn failing rather than the reaper.
+				assert.deepEqual(log.lines.error, [], 'a spawn that never ran was reported as a reaper that failed to execute');
+			} finally {
+				result.stop();
+				stopReaper(result.reaper);
+			}
+		})
+	));
+
 test('a claimLock failure while launching the reaper does not take the already-started processes down with it', () =>
 	withTempDir('guard-call-', (dir) =>
 		withSpawn(async ({ spawn }) => {
@@ -299,7 +330,7 @@ test('stopOrphans stops that same process, and the node is left with one', () =>
 			const after = await guard({ pidDir: dir, spawn, version: 2, stopOrphans: true, processes: [declare(tag)] });
 			try {
 				await waitFor(() => !isAlive(/** @type {number} */ (old)), 'the orphan to be stopped');
-				assert.match(after.report.join('\n'), new RegExp(`stopped pid ${old}`));
+				assert.match(after.report.join('\n'), new RegExp(`pid ${old} is an orphan .* It was sent SIGTERM`));
 				assert.equal(countRunning([process.execPath, fixture('idle.js'), tag]), 1);
 			} finally {
 				after.stop();

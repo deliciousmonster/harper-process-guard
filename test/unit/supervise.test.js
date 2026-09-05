@@ -315,6 +315,98 @@ test('a spawn that fails after preflight passed is answered, not reported as a s
 		})
 	));
 
+// A host's wrapper is not a ChildProcess and owes this package no 'error' event, so awaiting one is a
+// promise only a real child keeps. Both shapes below hung or threw out of a startup path holding a claim.
+test(
+	'a spawn return with no pid that reports no error is answered rather than waited on forever',
+	{ timeout: 10_000 },
+	() =>
+		withTempDir('guard-sup-', (dir) =>
+			withSpawn(async () => {
+				const ctx = context(dir, () => /** @type {never} */ ({ on() {}, once() {} }));
+				try {
+					const state = await superviseProcess(ctx, descriptorFor('silent-wrapper', 'idle.js'));
+					assert.equal(state.started, false, 'a spawn that never ran was reported as started');
+					assert.match(state.error ?? '', /failed to start: it returned no pid, and reported no error within \d+ms/);
+					assert.equal(
+						fs.existsSync(lockPath(dir, 'silent-wrapper')),
+						false,
+						'the claim was left behind, pinning the lock at pid 0 under a live host'
+					);
+				} finally {
+					ctx.run.stopping = true;
+				}
+			})
+		)
+);
+
+test('a spawn return with no pid and no once() is answered, not thrown out of the call', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async () => {
+			const ctx = context(dir, () => /** @type {never} */ ({ on() {} }));
+			try {
+				const state = await superviseProcess(ctx, descriptorFor('bare-wrapper', 'idle.js'));
+				assert.equal(state.started, false);
+				assert.match(state.error ?? '', /failed to start: it returned no pid, and it reports no errors/);
+				assert.equal(fs.existsSync(lockPath(dir, 'bare-wrapper')), false);
+			} finally {
+				ctx.run.stopping = true;
+			}
+		})
+	));
+
+test('a start this node cannot make signals no orphan, because the lock is where the signal happens', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			const descriptor = descriptorFor('deployed', 'idle.js');
+			const running = await alreadyRunning(dir, spawn, descriptor);
+			// The binary this node would spawn is gone under it, which is what a deploy over a live node does.
+			const missing = path.join(dir, 'not-a-binary');
+			const ctx = context(dir, spawn, { version: 2, stopOrphans: true });
+			const state = await superviseProcess(ctx, { ...descriptor, binaryPath: missing, argv: [missing] });
+
+			assert.equal(state.started, false);
+			assert.match(state.error ?? '', /not-a-binary is missing/);
+			assert.equal(
+				readLock(lockPath(dir, 'deployed'))?.pid,
+				pidOf(running),
+				'the lock naming the running process was taken and dropped for a replacement that never started'
+			);
+			assert.equal(
+				isAlive(pidOf(running)),
+				true,
+				'a healthy process was stopped for a replacement that could not start'
+			);
+		})
+	));
+
+test('a process a sibling thread stopped is not reported as a shutdown nobody performed', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			const descriptor = descriptorFor('handed-over', 'idle.js');
+			const victim = context(dir, spawn);
+			const stopper = context(dir, spawn, { version: 2, stopOrphans: true });
+			try {
+				const state = await superviseProcess(victim, descriptor);
+				// The sibling runs a version this node has moved to, so it stops what this thread started.
+				await superviseProcess(stopper, descriptor);
+				await waitFor(() => state.exited, 'the victim to see its process stopped');
+				await new Promise((resolve) => setTimeout(resolve, 150));
+
+				assert.match(victim.log.lines.warn.join('\n'), /was stopped \(signal SIGTERM\) by whatever now holds/);
+				assert.equal(
+					victim.log.lines.info.join('\n').includes('was shut down'),
+					false,
+					'a stop by a sibling thread was reported as an operator shutdown'
+				);
+				assert.deepEqual(victim.log.lines.error, [], 'a lock the stopper already holds was reported as a failure');
+			} finally {
+				victim.run.stopping = true;
+				stopper.run.stopping = true;
+			}
+		})
+	));
+
 test('a spawn the host refuses is reported and its lock is not left behind', () =>
 	withTempDir('guard-sup-', async (dir) => {
 		const ctx = context(dir, () => {

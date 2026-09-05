@@ -74,6 +74,12 @@ export function collectTargets(options) {
  * @param {ReaperOptions} options @param {{ path: string; pid: number; argv: readonly string[] }} target
  */
 export async function reapTarget(options, target) {
+	if (target.pid <= 0) {
+		// A claim whose pid was never recorded: the host died between the spawn and the commit. The process
+		// it started is probably running, and this lock is the only trace of it left to warn anybody with.
+		log(options, `${target.path}: names no pid, so it is left in place (${target.argv.join(' ')})`);
+		return;
+	}
 	const verdict = identify(target.pid, target.argv);
 	unlinkQuietly(target.path);
 	if (verdict !== 'match') {

@@ -6,14 +6,13 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 
-import { errnoCode, errorMessage, identify, isAlive, STOP_POLL_MS, waitWhileAlive } from './identity.js';
+import { errnoCode, errorMessage, identify, isAlive } from './identity.js';
 
 /** How long a thread waits before looking again at another thread's unfinished claim, which is one file read. */
-const POLL_MS = 2;
+const CLAIM_POLL_MS = 2;
 /** The gate is held across a read and a rename and nothing else, so a live holder is never in it long. */
 const GATE_RETRY_MS = 1;
 const GATE_WAIT_MS = 2000;
-const STOP_GRACE_MS = 5000;
 const GATE_SUFFIX = '.claiming';
 
 /**
@@ -147,32 +146,22 @@ function sameArgv(a, b) {
 	return a.length === b.length && a.every((value, index) => value === b[index]);
 }
 
-/**
- * SIGTERM and then report what happened. No SIGKILL: by the deadline the pid may name something else.
- *
- * @param {number} pid @param {string} name @param {Set<string>} notes
- */
-async function stopOrphan(pid, name, notes) {
+/** SIGTERM an identified orphan, once. @param {number} pid */
+function signal(pid) {
 	try {
 		process.kill(pid, 'SIGTERM');
 	} catch {
 		// ESRCH: it went between the identification and the signal, which is the outcome asked for.
 	}
-	await waitWhileAlive(pid, Date.now() + STOP_GRACE_MS, STOP_POLL_MS);
-	notes.add(
-		isAlive(pid)
-			? `${name}: pid ${pid} did not exit after SIGTERM, so it may still hold what its replacement needs.`
-			: `${name}: stopped pid ${pid}, an orphan left by an earlier configuration.`
-	);
 }
 
 /**
  * What to do about the lock as it stands. Reads the world and changes none of it, so the gate is held
- * for a read and a rename rather than for a signal and its grace period.
+ * for a read and a rename rather than for a signal.
  *
  * @param {Lock | null} held
  * @param {{ name: string, version: number, argv: readonly string[], stopOrphans: boolean, expired: boolean, notes: Set<string> }} against
- * @returns {{ act: 'take' | 'wait' } | { act: 'adopt' | 'stop', pid: number }}
+ * @returns {{ act: 'take', stop?: number } | { act: 'wait' } | { act: 'adopt', pid: number }}
  */
 function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) {
 	if (!held) return { act: 'take' };
@@ -206,16 +195,22 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 	}
 
 	// Ours by command line, under a configuration this node no longer runs.
-	if (stopOrphans) return { act: 'stop', pid: held.pid };
 	const drift =
 		held.version === version
 			? `a command line this node no longer uses (${held.argv.join(' ')})`
 			: `version ${held.version}, not ${version}`;
+	const orphan = `${name}: pid ${held.pid} is an orphan of an earlier configuration (${drift}).`;
+	if (!stopOrphans) {
+		notes.add(`${orphan} stopOrphans is off, so it was left running and may still hold what its replacement needs.`);
+		return { act: 'take' };
+	}
+	// Nothing here waits for it or escalates: a grace period would block the caller's startup to pick a
+	// phrasing, and by any deadline the pid may name something else. Stopping properly is the reaper's job.
 	notes.add(
-		`${name}: pid ${held.pid} is an orphan of an earlier configuration (${drift}). stopOrphans is off, ` +
-			`so it was left running and may still hold what its replacement needs.`
+		`${orphan} It was sent SIGTERM, which nothing here waits on: until it exits it may still hold what its ` +
+			`replacement needs, and nothing chases it if it ignores the signal.`
 	);
-	return { act: 'take' };
+	return { act: 'take', stop: held.pid };
 }
 
 /**
@@ -249,12 +244,13 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 		});
 
 		if (verdict === null) await delay(GATE_RETRY_MS);
-		else if (verdict.act === 'take') return { outcome: 'won', token, notes: [...notes] };
-		else if (verdict.act === 'adopt') return { outcome: 'adopted', pid: verdict.pid, notes: [...notes] };
-		// Signalled outside the gate: its grace period must not block every other thread's view of this
-		// lock. The pass after it finds a dead pid and reclaims the lock in the ordinary way.
-		else if (verdict.act === 'stop') await stopOrphan(verdict.pid, name, notes);
-		else await delay(POLL_MS);
+		else if (verdict.act === 'take') {
+			// After the gate, and after the lock is this claimant's: a thread that read a dying pid would
+			// adopt a corpse, where one that reads this claim waits for the process replacing it.
+			if (verdict.stop !== undefined) signal(verdict.stop);
+			return { outcome: 'won', token, notes: [...notes] };
+		} else if (verdict.act === 'adopt') return { outcome: 'adopted', pid: verdict.pid, notes: [...notes] };
+		else await delay(CLAIM_POLL_MS);
 	}
 }
 

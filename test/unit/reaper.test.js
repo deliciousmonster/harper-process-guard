@@ -72,6 +72,24 @@ test('an identified process is stopped, and its lock goes before the signal does
 		})
 	));
 
+test('a lock that names no pid keeps it, because it is the only trace of a process that is probably running', () =>
+	withTempDir('guard-reap-', (dir) =>
+		withSpawn(async ({ spawn }) => {
+			// A host killed between the spawn and the commit: the process runs, and its lock still reads pid 0.
+			// Removing it leaves the next boot nothing to adopt, so it starts a second one against the first.
+			const claimed = await running(spawn, 'never-committed');
+			seedLock(lockPath(dir, 'uncommitted'), { pid: 0, argv: claimed.argv });
+
+			await reapTarget(options(dir), collectTargets(options(dir))[0] ?? assert.fail('no target'));
+			assert.equal(
+				fs.existsSync(lockPath(dir, 'uncommitted')),
+				true,
+				'the only record of a live process was deleted for naming no pid'
+			);
+			assert.equal(isAlive(claimed.pid), true);
+		})
+	));
+
 test('a lock naming a pid nothing holds is removed and nothing is signalled', () =>
 	withTempDir('guard-reap-', async (dir) => {
 		const gone = await deadPid();

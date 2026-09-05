@@ -6,9 +6,9 @@ import path from 'node:path';
 import test from 'node:test';
 import { Worker } from 'node:worker_threads';
 
-import { argvOf } from '../../src/identity.js';
+import { argvOf, isAlive } from '../../src/identity.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from '../../src/lock.js';
-import { deadPid, fixture, pidOf, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
+import { deadPid, fixture, pidOf, readyLine, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
 
 const THREADS = 8;
 const ROUNDS = 300;
@@ -161,7 +161,7 @@ test('a live process under a different version is an orphan, reported and left a
 		})
 	));
 
-test('stopOrphans stops that same orphan, and says so', () =>
+test('stopOrphans signals that same orphan, and says so without claiming an outcome it did not watch for', () =>
 	withTempDir('guard-lock-', async (dir) =>
 		withSpawn(async ({ spawn }) => {
 			const argv = [process.execPath, fixture('idle.js'), 'old-release-stopped'];
@@ -177,10 +177,41 @@ test('stopOrphans stops that same orphan, and says so', () =>
 				stopOrphans: true,
 			});
 			assert.equal(claim.outcome, 'won');
-			assert.match(claim.notes.join('\n'), new RegExp(`stopped pid ${pidOf(child)}`));
-			assert.equal(argvOf(pidOf(child)), null, 'the orphan is still running');
+			assert.match(claim.notes.join('\n'), new RegExp(`pid ${pidOf(child)} is an orphan .* It was sent SIGTERM`));
+			await waitFor(() => argvOf(pidOf(child)) === null, 'the orphan to exit on the signal it was sent');
 		})
 	));
+
+test(
+	'an orphan that ignores SIGTERM is signalled once and the lock taken in the same pass, so the caller returns',
+	{ timeout: 10_000 },
+	() =>
+		withTempDir('guard-lock-', async (dir) =>
+			withSpawn(async ({ spawn }) => {
+				// Nothing here can make this process exit, so only the claimant's own structure ends the call.
+				// Waiting out a grace period and re-adjudicating never terminated: the verdict never changed.
+				const argv = [process.execPath, fixture('stubborn.js'), 'ignores-sigterm'];
+				const child = spawn(process.execPath, argv.slice(1), { stdio: ['ignore', 'pipe', 'ignore'] });
+				assert.equal(await readyLine(child), 'ready');
+				seedLock(lockPath(dir, 'wedge'), { pid: pidOf(child), version: 100, argv });
+
+				const claim = await claimLock({
+					pidDir: dir,
+					name: 'wedge',
+					version: 200,
+					argv,
+					timeoutMs: 1000,
+					stopOrphans: true,
+				});
+				assert.equal(claim.outcome, 'won');
+				if (claim.outcome !== 'won') return;
+				assert.equal(readLock(lockPath(dir, 'wedge'))?.token, claim.token, 'the lock was not taken in that pass');
+				// Nothing chases it, and the note says so rather than reporting a death nobody observed.
+				assert.equal(isAlive(pidOf(child)), true, 'something escalated past the one SIGTERM');
+				assert.match(claim.notes.join('\n'), /nothing chases it if it ignores the signal/);
+			})
+		)
+);
 
 test('an unfinished claim whose host is dead is taken over', () =>
 	withTempDir('guard-lock-', async (dir) => {

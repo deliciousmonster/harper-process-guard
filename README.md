@@ -103,6 +103,11 @@ one got there first. The owner keeps its lock across a crash, which is how a joi
 nobody owns from one already in hand; a deliberate shutdown (exit 0, SIGTERM, SIGINT, SIGHUP) is the
 one case where the lock goes and nothing is restarted.
 
+With `stopOrphans` on, this guard is itself a source of SIGTERM, and the process that receives one
+cannot tell who sent it. The lock can: a thread that finds another token holding it reports the stop
+as the handoff it is, names the holder as the one starting the replacement, and leaves that thread's
+lock alone.
+
 Restarts back off and are capped, and the cap is reported as what is now missing from the node.
 
 ### The reaper
@@ -117,7 +122,9 @@ reaper the processes outlive the host, and the next start reports them.
 
 The reaper removes a lock before signalling the process it names: a thread that reads a dying pid
 adopts a corpse and never retries, where one that finds nothing starts a replacement. It signals only
-what it can identify. Given `replacementPidFile`, a new host appearing inside the grace window keeps
+what it can identify, and it leaves a lock that names no pid exactly where it is: that lock records a
+spawn whose pid was never committed, so removing it would discard the only trace of a process that is
+probably still running. Given `replacementPidFile`, a new host appearing inside the grace window keeps
 the processes for it to adopt, which is what a restart needs.
 
 It is spawned as `process.execPath` first and a bare `node` second. Harper's
@@ -129,8 +136,19 @@ said so in the report, and left no lock behind.
 
 A live process whose lock carries this configuration is adopted. One whose version fingerprint or
 command line has moved is an orphan of an earlier release: the lock is taken, and the process is
-reported and left running unless `stopOrphans` is set, in which case it is SIGTERMed and the outcome
-reported. There is no SIGKILL on that path; by the deadline the pid may name something else.
+reported and left running unless `stopOrphans` is set, in which case the lock is taken and one SIGTERM
+sent in the same pass.
+
+Nothing waits for that signal and nothing escalates behind it. An orphan that ignores SIGTERM keeps
+running, its replacement fails to start against whatever it still holds, and the restart backoff is
+what retries; the note says exactly that rather than reporting a death nobody watched for. Waiting
+here would block the caller's whole startup to choose between two log phrasings, and by any deadline
+the pid may name something else anyway. Stopping a process properly - signal, grace, `SIGKILL` - is
+the reaper's job, and the reaper is the only thing here that does it.
+
+The binary is checked before the lock is claimed, because claiming it is where an orphan gets
+signalled: a node that cannot start a replacement must not stop what it has. A spawn the host refuses
+cannot be caught that early, so that one case still gives up the claim after the fact.
 
 ## What is not here
 
