@@ -9,7 +9,11 @@ import test from 'node:test';
 import { NOT_LOCAL, testJobSteps } from '../../scripts/ci-local.js';
 import { REPO_ROOT } from '../support/harness.js';
 
-const workflowText = fs.readFileSync(path.join(REPO_ROOT, '.github', 'workflows', 'test.yml'), 'utf-8');
+// Line endings normalised: a Windows checkout rewrites this file to CRLF unless git is told not to, and
+// the job header below is found by an exact newline match.
+const workflowText = fs
+	.readFileSync(path.join(REPO_ROOT, '.github', 'workflows', 'test.yml'), 'utf-8')
+	.replaceAll('\r\n', '\n');
 
 test('only the environment steps are excused, so a new excuse has to be argued for', () => {
 	// Coverage is lost by adding a name to NOT_LOCAL, which must not pass unnoticed.

@@ -8,7 +8,17 @@ import test from 'node:test';
 import { argvOf, isAlive } from '../../src/identity.js';
 import { lockPath } from '../../src/lock.js';
 import { collectTargets, parseArgs, reapTarget, replacementPid, run } from '../../src/reaper.js';
-import { deadPid, fixture, pidOf, readyLine, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
+import {
+	deadPid,
+	fixture,
+	pidOf,
+	readyLine,
+	seedLock,
+	skipOnWindows,
+	waitFor,
+	withSpawn,
+	withTempDir,
+} from '../support/harness.js';
 
 /** @param {string} dir @param {Partial<import('../../src/reaper.js').ReaperOptions>} [overrides] */
 const options = (dir, overrides = {}) => ({ hostPid: process.pid, pidDir: dir, graceMs: 0, ...overrides });
@@ -47,8 +57,16 @@ test('a lock whose pid is running something else loses its lock and keeps its pr
 		})
 	));
 
-test('an identified process is stopped, and its lock goes before the signal does', () =>
-	withTempDir('guard-reap-', (dir) =>
+test('an identified process is stopped, and its lock goes before the signal does', (t) => {
+	if (
+		skipOnWindows(
+			t,
+			'nothing on Windows can ignore a terminate, so neither the window between the lock going and the process ' +
+				'going nor the escalation from SIGTERM to SIGKILL is observable; both go uncovered there.'
+		)
+	)
+		return;
+	return withTempDir('guard-reap-', (dir) =>
 		withSpawn(async ({ spawn }) => {
 			// Ignores SIGTERM, so the window between the lock going and the process going is observable.
 			const argv = [process.execPath, fixture('stubborn.js'), 'stubborn'];
@@ -70,7 +88,8 @@ test('an identified process is stopped, and its lock goes before the signal does
 			await reaping;
 			assert.equal(isAlive(pidOf(child)), false, 'a process that ignored SIGTERM was never escalated to SIGKILL');
 		})
-	));
+	);
+});
 
 test('a lock that names no pid is removed, and the process it half-recorded is not signalled', () =>
 	withTempDir('guard-reap-', (dir) =>

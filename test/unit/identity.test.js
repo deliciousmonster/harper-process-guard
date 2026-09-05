@@ -5,8 +5,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
 
-import { argvOf, compareArgv, identify, isAlive } from '../../src/identity.js';
-import { deadPid, fixture, pidOf, readyLine, waitFor, withSpawn } from '../support/harness.js';
+import { argvOf, compareArgv, identify, isAlive, parseCimAnswer, windowsCommandLine } from '../../src/identity.js';
+import { deadPid, fixture, pidOf, readyLine, skipOnWindows, waitFor, withSpawn } from '../support/harness.js';
 
 // Harper's vm-current-context sandbox substitutes node:child_process with only these five names;
 // execFileSync isn't one, and a real Harper node refuses to load a component that imports it.
@@ -21,7 +21,8 @@ test('identity.js imports only what a real Harper node actually gives it from no
 	}
 });
 
-test('pid 1 reads as alive, so a containerised host is not reaped on sight', () => {
+test('pid 1 reads as alive, so a containerised host is not reaped on sight', (t) => {
+	if (skipOnWindows(t, 'Windows issues no pid 1; the lowest is the System process at 4')) return;
 	// Inside a container the host process IS pid 1. A guard that treats 1 as an invalid pid stops it.
 	assert.equal(isAlive(1), true);
 });
@@ -51,8 +52,10 @@ test('two node scripts are told apart by argv, which is the only thing that sepa
 		assert.equal(identify(pidOf(b), second), 'match');
 		assert.equal(identify(pidOf(a), second), 'differs');
 		assert.equal(identify(pidOf(b), first), 'differs');
-		// The same executable for both, which is exactly why it identifies nothing.
-		assert.equal(argvOf(pidOf(a))?.[0], argvOf(pidOf(b))?.[0]);
+		// The same executable for both, which is exactly why it identifies nothing: an expectation of the
+		// interpreter alone matches whichever of the two you point it at.
+		assert.equal(identify(pidOf(a), [process.execPath]), 'match');
+		assert.equal(identify(pidOf(b), [process.execPath]), 'match');
 	}));
 
 test('a leading run matches, and pinning more of the command line can only narrow the verdict', () =>
@@ -86,7 +89,10 @@ test('a dead pid identifies as something else, so nothing acts on it as though i
 	assert.equal(identify(await deadPid(), [process.execPath]), 'differs');
 });
 
-test('a zombie is not alive: it holds its pid and answers kill(pid, 0), but runs nothing', async () => {
+test('a zombie is not alive: it holds its pid and answers kill(pid, 0), but runs nothing', async (t) => {
+	// Windows has no zombie state at all. Its nearest thing, a terminated pid an open handle still names,
+	// is settled by kill(pid, 0) itself: libuv reads GetExitCodeProcess there and reports ESRCH.
+	if (skipOnWindows(t, 'Windows has no zombie state; kill(pid, 0) settles the terminated-but-handled pid')) return;
 	// `exec` replaces the shell, so the child it backgrounded is inherited by a process that never
 	// waits on it. That corpse is exactly what a non-reaping init leaves behind in a container.
 	await withSpawn(async ({ spawn }) => {
@@ -107,5 +113,111 @@ test('a zombie is not alive: it holds its pid and answers kill(pid, 0), but runs
 		}
 		assert.equal(holdsPid, true, 'the corpse was reaped before it could be observed');
 		assert.equal(isAlive(zombie), false);
+	});
+});
+
+/**
+ * Run `body` with process.platform reporting `platform`. Synchronous on purpose: node:test runs top-level
+ * tests one at a time, and an await under the override would leak it into whatever ran next.
+ *
+ * @template T @param {NodeJS.Platform} platform @param {() => T} body @returns {T}
+ */
+function onPlatform(platform, body) {
+	const real = /** @type {PropertyDescriptor} */ (Object.getOwnPropertyDescriptor(process, 'platform'));
+	Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+	try {
+		return body();
+	} finally {
+		Object.defineProperty(process, 'platform', real);
+	}
+}
+
+test('the win32 probe tells a process that is gone from one that would not say what it is', () => {
+	// Same shape on the wire, opposite consequences: 'gone' reclaims the lock, a command line nobody
+	// would report must not, because the guard signals what it has identified.
+	assert.deepEqual(parseCimAnswer('gone\r\n'), { alive: false, argv: null });
+	assert.deepEqual(parseCimAnswer('live C:\\dd\\agent.exe run\r\n'), { alive: true, argv: ['C:\\dd\\agent.exe run'] });
+	assert.deepEqual(parseCimAnswer('live \r\n'), { alive: true, argv: null });
+});
+
+test('an answer the probe did not write is no answer at all', () => {
+	// A PowerShell that never started, a CIM query that threw, a timeout that killed it mid-sentence.
+	// Reading any of those as 'gone' would reclaim a lock off a process that is still running.
+	assert.equal(parseCimAnswer(''), null);
+	assert.equal(parseCimAnswer('At line:1 char:1\r\n'), null);
+	assert.equal(parseCimAnswer('livewire'), null);
+});
+
+test('a BOM in front of redirected PowerShell output does not hide the answer', () => {
+	assert.deepEqual(parseCimAnswer('\uFEFFgone\r\n'), { alive: false, argv: null });
+});
+
+test('a Windows command line identifies the process the guard recorded, quoting and all', () =>
+	onPlatform('win32', () => {
+		// Windows keeps no argv, only the one string node's spawn built, and libuv quoted the install path
+		// because it holds a space. The vector on the lock never had those quotes.
+		const argv = ['C:\\Program Files\\dd\\agent.exe', 'run', '--cfgpath', 'C:\\ProgramData\\dd'];
+		const reported =
+			parseCimAnswer('live "C:\\Program Files\\dd\\agent.exe" run --cfgpath C:\\ProgramData\\dd')?.argv ?? null;
+
+		assert.equal(compareArgv(reported, argv), 'match');
+		assert.equal(compareArgv(reported, argv.slice(0, 2)), 'match', 'a leading run must match');
+		assert.equal(compareArgv(reported, [...argv, 'more']), 'differs', 'a longer expectation cannot match');
+		assert.equal(compareArgv(reported, ['C:\\dd\\agent.exe', 'run']), 'differs');
+	}));
+
+test('on win32 a matching prefix still has to end on an argument boundary', () =>
+	onPlatform('win32', () => {
+		assert.equal(compareArgv(['agent.exe --config x'], ['agent.exe', '--conf']), 'differs');
+		assert.equal(compareArgv(['agent.exe --conf x'], ['agent.exe', '--conf']), 'match');
+	}));
+
+test('a Windows process that will not report its command line is never identified as ours', () =>
+	onPlatform('win32', () => {
+		// Win32_Process hands back the object with CommandLine null for a process this user may not read.
+		// Were that a match, the reaper would SIGTERM whatever stranger now holds the pid.
+		assert.equal(compareArgv(parseCimAnswer('live ')?.argv ?? null, ['C:\\dd\\agent.exe']), 'unknown');
+	}));
+
+test('an argument is quoted the way libuv quotes it, or an install path with a space identifies nothing', () => {
+	// libuv's own cases, from the comment above quote_cmd_arg in src/win/process.c. node's spawn hands the
+	// vector to that function, so this is the string Win32_Process reads back off the running process.
+	assert.equal(windowsCommandLine(['plain']), 'plain');
+	assert.equal(windowsCommandLine([String.raw`hello\world`]), String.raw`hello\world`);
+	assert.equal(windowsCommandLine([String.raw`hello\\world`]), String.raw`hello\\world`);
+	assert.equal(windowsCommandLine([String.raw`hello"world`]), String.raw`"hello\"world"`);
+	assert.equal(windowsCommandLine([String.raw`hello""world`]), String.raw`"hello\"\"world"`);
+	assert.equal(windowsCommandLine([String.raw`hello\"world`]), String.raw`"hello\\\"world"`);
+	assert.equal(windowsCommandLine([String.raw`hello\\"world`]), String.raw`"hello\\\\\"world"`);
+	assert.equal(windowsCommandLine(['hello world\\']), '"hello world\\\\"');
+	assert.equal(windowsCommandLine(['']), '""');
+	// A space and nothing else to escape: libuv wraps and stops there, which is its own branch.
+	assert.equal(windowsCommandLine(['dd agent', 'run']), '"dd agent" run');
+	assert.equal(
+		windowsCommandLine(['C:\\Program Files\\dd\\agent.exe', 'run']),
+		'"C:\\Program Files\\dd\\agent.exe" run'
+	);
+});
+
+test('a win32 node that cannot run the probe answers unknown, never a match', (t) => {
+	if (skipOnWindows(t, 'the probe runs here; this covers a host where it cannot')) return;
+	onPlatform('win32', () => {
+		// No powershell.exe on this machine, which from the caller's side is what a Windows box with a
+		// broken WMI service looks like. Liveness still answers, because it never goes through the probe.
+		assert.equal(argvOf(process.pid), null);
+		assert.equal(identify(process.pid, [process.execPath]), 'unknown');
+		assert.equal(isAlive(1), true, 'liveness must not go through the probe');
+	});
+});
+
+test('a liveness poll on win32 does not pay for a command line nobody asked for', (t) => {
+	if (skipOnWindows(t, 'the probe would really run here; this measures the branch that skips it')) return;
+	onPlatform('win32', () => {
+		// The reaper polls liveness every second for the life of the node and supervise every two. Routed
+		// through the probe that is a PowerShell start apiece: 0.9ms for 200 calls here, 835ms through it.
+		const started = performance.now();
+		for (let i = 0; i < 200; i++) isAlive(1);
+		const elapsed = performance.now() - started;
+		assert.ok(elapsed < 150, `200 liveness checks took ${elapsed.toFixed(0)}ms, so they went through the probe`);
 	});
 });

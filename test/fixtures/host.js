@@ -2,6 +2,7 @@
 // rather than stopping it politely. Nothing in-process runs when a host is killed; that is the reaper's
 // whole reason for existing.
 import { spawn } from 'node:child_process';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { guard } from '../../src/index.js';
@@ -14,7 +15,7 @@ const result = await guard({
 	spawn,
 	version: 1,
 	processes: [{ name: 'guarded', binaryPath: process.execPath, args: [idle, tag ?? ''] }],
-	reaper: { name: 'reaper', graceMs: 100, logFile: `${pidDir}/reaper.log` },
+	reaper: { name: 'reaper', graceMs: 100, logFile: join(pidDir ?? '', 'reaper.log') },
 });
 
 process.stdout.write(`${JSON.stringify({ guarded: result.processes[0]?.pid, reaper: result.reaper })}\n`);

@@ -9,11 +9,20 @@ import { Worker } from 'node:worker_threads';
 
 import { isAlive } from '../../src/identity.js';
 import { lockPath, readLock } from '../../src/lock.js';
-import { countRunning, fixture, readyLine, waitFor, withSpawn, withTempDir } from '../support/harness.js';
+import {
+	countRunning,
+	fixture,
+	readyLine,
+	skipOnWindows,
+	slow,
+	waitFor,
+	withSpawn,
+	withTempDir,
+} from '../support/harness.js';
 
 const THREADS = 8;
 
-test('eight worker threads calling guard() leave one process running on the node', { timeout: 60_000 }, () =>
+test('eight worker threads calling guard() leave one process running on the node', { timeout: slow(60_000) }, () =>
 	withTempDir('guard-e2e-', async (dir) => {
 		// Every thread of a host evaluates every component, so every thread reaches this call. Without
 		// arbitration that is eight processes, and all but one fail to bind whatever they bind.
@@ -40,6 +49,8 @@ test('eight worker threads calling guard() leave one process running on the node
 			);
 
 			assert.equal(countRunning(argv), 1, 'more than one process was started for one declared process');
+			// The other direction, because a counter stuck at 1 would read as one winner however many there were.
+			assert.equal(countRunning([...argv, 'never-spawned']), 0, 'a command line nothing runs was counted');
 			const starters = results.filter((r) => r.started && !r.adopted);
 			assert.equal(starters.length, 1, `${starters.length} threads believed they started it`);
 			assert.equal(new Set(results.map((r) => r.pid)).size, 1, 'the threads disagree about which process is theirs');
@@ -60,7 +71,7 @@ test('eight worker threads calling guard() leave one process running on the node
 	})
 );
 
-test('a killed host does not leave its process behind', { timeout: 60_000 }, () =>
+test('a killed host does not leave its process behind', { timeout: slow(60_000) }, () =>
 	withTempDir('guard-e2e-', (dir) =>
 		withSpawn(async ({ spawn }) => {
 			const tag = `e2e-reaped-${process.pid}`;
@@ -75,7 +86,7 @@ test('a killed host does not leave its process behind', { timeout: 60_000 }, () 
 			// and no signal handler fires, so only something outside the host can stop what it started.
 			host.kill('SIGKILL');
 			await waitFor(() => !isAlive(started.guarded), 'the reaper to stop the process its host left behind', {
-				timeoutMs: 30_000,
+				timeoutMs: slow(30_000),
 				intervalMs: 100,
 			});
 			assert.equal(fs.existsSync(lockPath(dir, 'guarded')), false, 'the reaper left the lock behind');
@@ -86,9 +97,18 @@ test('a killed host does not leave its process behind', { timeout: 60_000 }, () 
 
 test(
 	'a real SIGTERM to the reaper itself removes its own lock, leaving the host and its process alone',
-	{ timeout: 30_000 },
-	() =>
-		withTempDir('guard-e2e-', (dir) =>
+	{ timeout: slow(30_000) },
+	(t) => {
+		if (
+			skipOnWindows(
+				t,
+				'a Windows process cannot be sent SIGTERM: process.kill terminates the reaper before its handler runs, ' +
+					'so the handler at src/reaper.js:197 is inert there and the reaper leaves its own lock behind. ' +
+					'Neither the cleanup nor that leak is covered on Windows.'
+			)
+		)
+			return;
+		return withTempDir('guard-e2e-', (dir) =>
 			withSpawn(async ({ spawn }) => {
 				const tag = `e2e-reaper-sigterm-${process.pid}`;
 				const host = spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
@@ -112,7 +132,7 @@ test(
 						() => !fs.existsSync(lockPath(dir, 'reaper')),
 						'the reaper to remove its own lock after SIGTERM',
 						{
-							timeoutMs: 10_000,
+							timeoutMs: slow(10_000),
 							intervalMs: 50,
 						}
 					);
@@ -132,29 +152,33 @@ test(
 					}
 				}
 			})
-		)
+		);
+	}
 );
 
-test('a second host started beside the first joins its process rather than starting another', { timeout: 60_000 }, () =>
-	withTempDir('guard-e2e-', (dir) =>
-		withSpawn(async ({ spawn }) => {
-			const tag = `e2e-two-hosts-${process.pid}`;
-			const first = spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
-			const one = JSON.parse(await readyLine(first));
-			const second = spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
-			const two = JSON.parse(await readyLine(second));
+test(
+	'a second host started beside the first joins its process rather than starting another',
+	{ timeout: slow(60_000) },
+	() =>
+		withTempDir('guard-e2e-', (dir) =>
+			withSpawn(async ({ spawn }) => {
+				const tag = `e2e-two-hosts-${process.pid}`;
+				const first = spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const one = JSON.parse(await readyLine(first));
+				const second = spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const two = JSON.parse(await readyLine(second));
 
-			assert.equal(two.guarded, one.guarded, 'the second host started its own copy');
-			assert.equal(countRunning([process.execPath, fixture('idle.js'), tag]), 1);
-			// Its reaper watches a different host, so its command line differs and it takes its own turn.
-			assert.equal(two.reaper.started, true);
+				assert.equal(two.guarded, one.guarded, 'the second host started its own copy');
+				assert.equal(countRunning([process.execPath, fixture('idle.js'), tag]), 1);
+				// Its reaper watches a different host, so its command line differs and it takes its own turn.
+				assert.equal(two.reaper.started, true);
 
-			first.kill('SIGKILL');
-			second.kill('SIGKILL');
-			await waitFor(() => !isAlive(one.guarded), 'the process to be stopped once both hosts are gone', {
-				timeoutMs: 30_000,
-				intervalMs: 100,
-			});
-		})
-	)
+				first.kill('SIGKILL');
+				second.kill('SIGKILL');
+				await waitFor(() => !isAlive(one.guarded), 'the process to be stopped once both hosts are gone', {
+					timeoutMs: slow(30_000),
+					intervalMs: 100,
+				});
+			})
+		)
 );

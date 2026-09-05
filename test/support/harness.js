@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+export const WINDOWS = process.platform === 'win32';
+
 /** test/support sits two levels below the repo root. */
 export const REPO_ROOT = path.resolve(import.meta.dirname, '..', '..');
 const FIXTURES = path.join(REPO_ROOT, 'test', 'fixtures');
@@ -14,8 +16,29 @@ const FIXTURES = path.join(REPO_ROOT, 'test', 'fixtures');
 export const fixture = (name) => path.join(FIXTURES, name);
 
 /**
- * mkdtemp pre-resolved: the macOS tmpdir sits behind /var -> /private/var, and these suites compare
- * paths against `ps` output, which is already resolved.
+ * Headroom for the Windows runner, which is slower at process and file work than the hosts these
+ * timings were tuned on, and where one command-line lookup costs a process start. A factor rather than
+ * a measurement: every wait keeps its shape and its ratio to every other.
+ *
+ * @param {number} ms
+ */
+export const slow = (ms) => (WINDOWS ? ms * 4 : ms);
+
+/**
+ * Skip on Windows, naming what goes uncovered there. Returns whether it skipped, so the caller returns
+ * rather than running on: a skip whose reason is unstated reads as a pass.
+ *
+ * @param {import('node:test').TestContext} t @param {string} reason @returns {boolean}
+ */
+export function skipOnWindows(t, reason) {
+	if (!WINDOWS) return false;
+	t.skip(reason);
+	return true;
+}
+
+/**
+ * mkdtemp pre-resolved: the macOS tmpdir sits behind /var -> /private/var and the Windows one can come
+ * back as an 8.3 short path, and these suites compare paths against a process table that holds neither.
  *
  * @param {string} prefix
  */
@@ -37,7 +60,9 @@ export async function withTempDir(prefix, run) {
 	try {
 		return await run(dir);
 	} finally {
-		fs.rmSync(dir, { recursive: true, force: true });
+		// Retried on Windows, where unlink refuses a file another process still holds open: a reaper this
+		// test started may not have closed its log yet.
+		fs.rmSync(dir, { recursive: true, force: true, maxRetries: WINDOWS ? 10 : 0, retryDelay: 50 });
 	}
 }
 
@@ -49,13 +74,18 @@ export async function withTempDir(prefix, run) {
  * @param {string} what
  * @param {{ timeoutMs?: number, intervalMs?: number }} [options]
  */
-export async function waitFor(predicate, what, { timeoutMs = 10_000, intervalMs = 10 } = {}) {
+export async function waitFor(predicate, what, { timeoutMs = slow(10_000), intervalMs = 10 } = {}) {
 	const deadline = Date.now() + timeoutMs;
 	for (;;) {
 		if (await predicate()) return;
 		if (Date.now() >= deadline) throw new Error(`timed out after ${timeoutMs}ms waiting for ${what}`);
 		await new Promise((resolve) => setTimeout(resolve, intervalMs));
 	}
+}
+
+/** A window for something to happen in, given to a test whose claim is that nothing did. @param {number} ms */
+export function settle(ms) {
+	return new Promise((resolve) => setTimeout(resolve, slow(ms)));
 }
 
 /** A pid nothing holds: a real process, run to completion and reaped, so the number was genuinely issued. */
@@ -116,8 +146,18 @@ export async function withSpawn(run) {
 }
 
 /**
- * A supervise Context with the timings wound down, so a restart test measures the behaviour rather
- * than the backoff schedule.
+ * The supervision timings wound down, so a restart test measures the behaviour rather than the backoff
+ * schedule. Every millisecond goes through slow(); restartMax is a count and does not.
+ *
+ * @param {Partial<import('../../src/supervise.js').Tuning>} [overrides]
+ * @returns {import('../../src/supervise.js').Tuning}
+ */
+export function tuning({ deathPollMs = 20, restartMax = 5, restartBaseMs = 10 } = {}) {
+	return { deathPollMs: slow(deathPollMs), restartMax, restartBaseMs: slow(restartBaseMs) };
+}
+
+/**
+ * A supervise Context with those timings.
  *
  * @param {string} pidDir
  * @param {import('../../src/supervise.js').Spawn} spawn
@@ -131,10 +171,10 @@ export function context(pidDir, spawn, overrides = {}) {
 		version: 1,
 		stopOrphans: false,
 		log: captureLog(),
-		claimTimeoutMs: 5000,
+		claimTimeoutMs: slow(5000),
 		report: [],
 		run: { stopping: false },
-		tuning: { deathPollMs: 20, restartMax: 5, restartBaseMs: 10 },
+		tuning: tuning(),
 		...overrides,
 	};
 }
@@ -152,15 +192,49 @@ export function seedLock(file, { pid, version = 1, token = 'seeded', host = 1, a
 }
 
 /**
+ * Every command line running on this machine, one per line. `ps` reads the process table itself;
+ * Windows has no such tool, so there it costs a PowerShell start per call - which is why nothing polls
+ * this. Get-CimInstance rather than wmic.exe, which is gone from Windows 11 24H2 and Server 2025.
+ */
+function commandLines() {
+	const table = WINDOWS
+		? realSpawnSync(
+				'powershell.exe',
+				[
+					'-NoProfile',
+					'-NonInteractive',
+					'-Command',
+					'Get-CimInstance Win32_Process | ForEach-Object { $_.CommandLine }',
+				],
+				{ encoding: 'utf-8' }
+			)
+		: realSpawnSync('ps', ['-A', '-o', 'args='], { encoding: 'utf-8' });
+	// A query that failed would otherwise read as "nothing is running", which is a passing answer to some
+	// of the questions asked here.
+	if (table.error || table.status !== 0)
+		throw new Error(`the process table could not be read: ${table.error ?? `exit ${table.status}`}`);
+	return table.stdout;
+}
+
+/**
+ * Windows quotes a whole argument that holds a space and adds nothing else, so dropping every quote
+ * compares the same words `ps` has already joined with single spaces. No argv in this suite contains one.
+ *
+ * @param {string} line
+ */
+const asCommandLine = (line) => (WINDOWS ? line.replaceAll('"', '') : line).trim().replace(/\s+/g, ' ');
+
+/**
  * How many processes on this machine are running exactly this command line. Counted from the process
  * table rather than from the guard's own bookkeeping, because the bookkeeping is what is under test.
  *
  * @param {readonly string[]} argv
  */
 export function countRunning(argv) {
-	const wanted = argv.join(' ');
-	const table = realSpawnSync('ps', ['-A', '-o', 'args='], { encoding: 'utf-8' }).stdout ?? '';
-	return table.split('\n').filter((line) => line.trim().replace(/\s+/g, ' ') === wanted).length;
+	const wanted = asCommandLine(argv.join(' '));
+	return commandLines()
+		.split('\n')
+		.filter((line) => asCommandLine(line) === wanted).length;
 }
 
 /** The first line a fixture writes once it is doing its job, so nothing signals it too early. @param {import('node:child_process').ChildProcess} child */

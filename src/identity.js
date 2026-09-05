@@ -12,6 +12,13 @@ import { setTimeout as delay } from 'node:timers/promises';
  */
 
 const PS_TIMEOUT_MS = 2000;
+const CIM_TIMEOUT_MS = 1500;
+/** The longest one inspect() can take. lock.js holds its gate across an identify, so a waiter that gives up
+ * sooner breaks a gate a live thread is still inside, and both then decide one lock at once. */
+export const IDENTIFY_BUDGET_MS = Math.max(PS_TIMEOUT_MS, CIM_TIMEOUT_MS);
+/** The two answers the win32 probe may print, so the script that writes them and the reader below are one protocol. */
+const LIVE = 'live';
+const GONE = 'gone';
 
 /** @param {unknown} error @returns {string | undefined} */
 export function errnoCode(error) {
@@ -24,17 +31,65 @@ export function errorMessage(error) {
 }
 
 /**
- * One look at a pid: whether it still runs, and what its command line is. Both answers come from one
- * call, because on darwin each separate question costs a `ps` and these run on every liveness poll.
+ * The win32 probe's answer, or null when it printed neither. 'gone' is "no such process"; 'live' with
+ * nothing after it is a process that exists and would not say what it is, which stays "cannot tell".
+ *
+ * @param {string} stdout
+ * @returns {{ alive: boolean, argv: string[] | null } | null}
+ */
+export function parseCimAnswer(stdout) {
+	// PowerShell may put a BOM in front of redirected output; the marker still has to start the answer.
+	const text = stdout.replace(/^\uFEFF/, '').trim();
+	if (text === GONE) return { alive: false, argv: null };
+	if (text !== LIVE && !text.startsWith(`${LIVE} `)) return null;
+	const commandLine = text.slice(LIVE.length).trim();
+	return { alive: true, argv: commandLine === '' ? null : [commandLine] };
+}
+
+/**
+ * One argument as libuv writes it into a Windows command line (src/win/process.c, quote_cmd_arg). Windows
+ * keeps no argv, so the recorded vector has to be quoted the way it was to compare against what it kept.
+ *
+ * @param {string} argument
+ * @returns {string}
+ */
+function quoteForWindows(argument) {
+	if (argument.length === 0) return '""';
+	if (!/[ \t"]/.test(argument)) return argument;
+	if (!/["\\]/.test(argument)) return `"${argument}"`;
+	let escaped = '';
+	let backslashes = 0;
+	for (const character of argument) {
+		if (character === '\\') {
+			backslashes += 1;
+			continue;
+		}
+		// A run of backslashes is doubled only where it meets a quote, the closing one below included.
+		escaped += character === '"' ? `${'\\'.repeat(backslashes * 2 + 1)}"` : `${'\\'.repeat(backslashes)}${character}`;
+		backslashes = 0;
+	}
+	return `"${escaped}${'\\'.repeat(backslashes * 2)}"`;
+}
+
+/** The command line Windows reports for a process node spawned with `argv`. @param {readonly string[]} argv @returns {string} */
+export function windowsCommandLine(argv) {
+	return argv.map(quoteForWindows).join(' ');
+}
+
+/**
+ * One look at a pid: whether it still runs, and what its command line is. Where one read answers both it
+ * does, because on darwin a separate liveness question would cost a second `ps` on every poll.
  *
  * A zombie holds its pid and answers kill(pid, 0), but runs nothing and never will again, so it counts
  * as gone. Only 0 and negatives are refused outright: kill(2) reads those as process GROUPS, whereas
  * pid 1 is a process, and inside a container it is the host this guard watches.
  *
  * @param {number} pid
+ * @param {boolean} [withCommandLine] False asks liveness alone. It changes nothing on linux or darwin,
+ *   where one read answers both, and skips a PowerShell on win32, where kill(pid, 0) settles liveness.
  * @returns {{ alive: boolean, argv: string[] | null }} argv null is "cannot tell", never "no arguments".
  */
-function inspect(pid) {
+function inspect(pid, withCommandLine = true) {
 	if (!Number.isInteger(pid) || pid <= 0) return { alive: false, argv: null };
 	try {
 		process.kill(pid, 0);
@@ -72,6 +127,23 @@ function inspect(pid) {
 			// `ps` joined the vector with single spaces already, which is why compareArgv compares joined text.
 			return { alive: true, argv: argv.length > 0 ? argv : null };
 		}
+		if (process.platform === 'win32') {
+			// Liveness never reaches the probe: libuv's kill(pid, 0) reads GetExitCodeProcess and
+			// WaitForSingleObject, so a terminated pid an open handle still names read ESRCH above.
+			if (!withCommandLine) return { alive: true, argv: null };
+			// PowerShell CIM, because `wmic` is absent from recent Windows and `tasklist` has no command
+			// line. Estimated 250-600ms a call against 3.5ms measured for `ps`, which is why nothing polls it.
+			const script =
+				`[Console]::OutputEncoding=[Text.Encoding]::UTF8;` +
+				`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop;` +
+				`if($null -eq $p){'${GONE}'}else{'${LIVE} '+$p.CommandLine}`;
+			const stdout = execSync(`powershell.exe -NoProfile -NonInteractive -Command "${script}"`, {
+				encoding: 'utf-8',
+				timeout: CIM_TIMEOUT_MS,
+				stdio: ['ignore', 'pipe', 'ignore'],
+			});
+			return parseCimAnswer(stdout) ?? { alive: true, argv: null };
+		}
 	} catch {
 		// The state could not be read. Liveness was already answered by kill(pid, 0), and a command line
 		// nothing can read is "cannot tell".
@@ -83,8 +155,8 @@ function inspect(pid) {
 
 /** @param {number} pid */
 export function isAlive(pid) {
-	// A process cannot be a zombie to itself, and asking the OS costs a `ps` on every liveness poll.
-	return pid === process.pid || inspect(pid).alive;
+	// A process cannot be a zombie to itself, and the command line is not part of this question.
+	return pid === process.pid || inspect(pid, false).alive;
 }
 
 /** Cadence for a wait measured in seconds: each pass costs a `ps` on darwin, so a tighter one buys nothing and forks hundreds of times. */
@@ -110,11 +182,11 @@ export function argvOf(pid) {
  */
 export function compareArgv(actual, expected) {
 	if (expected.length === 0 || actual === null) return 'unknown';
-	if (process.platform === 'darwin') {
-		// Joined, because `ps` joined it already and re-splitting reads one spaced argument as two. The
+	if (process.platform === 'darwin' || process.platform === 'win32') {
+		// Joined, because both report one string and re-splitting reads a spaced argument as two. The
 		// trailing space is what keeps `--conf` from matching a prefix of `--config`.
 		const head = actual.join(' ');
-		const want = expected.join(' ');
+		const want = process.platform === 'win32' ? windowsCommandLine(expected) : expected.join(' ');
 		return head === want || head.startsWith(`${want} `) ? 'match' : 'differs';
 	}
 	return expected.every((argument, index) => actual[index] === argument) ? 'match' : 'differs';

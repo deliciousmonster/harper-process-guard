@@ -6,11 +6,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
+import { testMatrix } from '../../scripts/ci-local.js';
 import { REPO_ROOT } from '../support/harness.js';
 
 const SRC = path.join(REPO_ROOT, 'src');
 const sources = fs.readdirSync(SRC).filter((file) => file.endsWith('.js'));
-/** @type {{ scripts: Record<string, string>, dependencies?: object, exports: Record<string, string>, files: string[] }} */
+/** @type {{ scripts: Record<string, string>, dependencies?: object, exports: Record<string, string>, files: string[], os?: string[] }} */
 const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8'));
 
 test('what is written is what ships: no build step, and the entry points at the source', () => {
@@ -23,6 +24,24 @@ test('what is written is what ships: no build step, and the entry points at the 
 	assert.match(manifest.scripts.typecheck ?? '', /--noEmit/);
 });
 
+/** A runner label against the process.platform it reports, so the two lists below compare as platforms. */
+const PLATFORM_OF = new Map([
+	['ubuntu-latest', 'linux'],
+	['macos-latest', 'darwin'],
+	['windows-latest', 'win32'],
+]);
+
+test('the platforms the manifest claims are exactly the platforms CI runs', () => {
+	// `os` makes npm refuse the install anywhere else, so a platform claimed and never run is a promise
+	// nothing keeps- and a platform run and not claimed is evidence thrown away.
+	const tested = testMatrix().os.map((label) => {
+		const platform = PLATFORM_OF.get(label);
+		if (!platform) throw new Error(`test.yml runs "${label}", which nothing here maps to a process.platform`);
+		return platform;
+	});
+	assert.deepEqual(tested.toSorted(), (manifest.os ?? []).toSorted());
+});
+
 test('no runtime dependencies', () => {
 	assert.equal(manifest.dependencies, undefined);
 });
@@ -30,7 +49,8 @@ test('no runtime dependencies', () => {
 test('every source file is typechecked', () => {
 	assert.ok(sources.length > 0, 'no sources were found, so this asserted nothing');
 	for (const file of sources) {
-		const first = fs.readFileSync(path.join(SRC, file), 'utf-8').split('\n')[0];
+		// Either line ending: a Windows checkout rewrites these files to CRLF unless git is told not to.
+		const first = fs.readFileSync(path.join(SRC, file), 'utf-8').split(/\r?\n/)[0];
 		assert.equal(first, '// @ts-check', `src/${file} opts out of the typecheck`);
 	}
 });

@@ -17,15 +17,35 @@ export const NOT_LOCAL = new Map([
 	['Install dependencies', 'pass --full to run npm ci'],
 ]);
 
-// Every step of the `test` job, in order, as `{ name, run }`; a real YAML parse, so legal
-// reformatting of test.yml (indent width, comments between steps) cannot break extraction.
-export function testJobSteps() {
-	/** @type {{ jobs?: Record<string, { steps?: { name?: unknown; run?: unknown }[] }> }} */
+/** @typedef {{ steps?: { name?: unknown, run?: unknown }[], strategy?: { matrix?: { os?: string[], node?: string[] } } }} TestJob */
+
+// The `test` job as declared; a real YAML parse, so legal reformatting of test.yml (indent width,
+// comments between steps) cannot break anything read out of it.
+/** @returns {TestJob} */
+function testJob() {
+	/** @type {{ jobs?: Record<string, TestJob> }} */
 	const workflow = parse(readFileSync(WORKFLOW, 'utf-8'));
 	const declared = workflow?.jobs?.test;
 	if (!declared) throw new Error('test.yml: no `test:` job');
+	return declared;
+}
 
-	const steps = (declared.steps ?? [])
+/**
+ * The runner labels and node versions the test job really runs, so nothing states the matrix from
+ * memory: package.json's `os` is checked against this, and the report below counts it.
+ *
+ * @returns {{ os: string[], node: string[] }}
+ */
+export function testMatrix() {
+	const { os = [], node = [] } = testJob().strategy?.matrix ?? {};
+	// A matrix that read as empty would let both of those claim anything at all.
+	if (os.length === 0 || node.length === 0) throw new Error('test.yml: the test job declares no os/node matrix');
+	return { os, node };
+}
+
+/** Every step of the `test` job, in order, as `{ name, run }`. */
+export function testJobSteps() {
+	const steps = (testJob().steps ?? [])
 		.filter((step) => typeof step.name === 'string')
 		.map((step) => ({
 			name: /** @type {string} */ (step.name),
@@ -83,9 +103,10 @@ function main() {
 		`\n${failed === 0 ? 'PASS' : 'FAIL'}: ${steps.length - failed - skipped} ran, ${failed} failed, ${skipped} skipped.` +
 			(skipped && !full ? ' Re-run with --full to include npm ci.' : '')
 	);
+	const matrix = testMatrix();
 	console.log(
 		'This is not a substitute for CI. It runs one platform on one Node, not the\n' +
-			"two-by-two matrix, and publish.yml's guards are not exercised here."
+			`${matrix.os.length}-by-${matrix.node.length} matrix, and publish.yml's guards are not exercised here.`
 	);
 	process.exit(failed === 0 ? 0 : 1);
 }

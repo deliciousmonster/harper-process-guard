@@ -9,10 +9,23 @@ import test from 'node:test';
 import { fingerprint, guard } from '../../src/index.js';
 import { isAlive } from '../../src/identity.js';
 import { lockPath, readLock } from '../../src/lock.js';
-import { captureLog, countRunning, fixture, REPO_ROOT, waitFor, withSpawn, withTempDir } from '../support/harness.js';
+import {
+	captureLog,
+	countRunning,
+	fixture,
+	REPO_ROOT,
+	waitFor,
+	WINDOWS,
+	withSpawn,
+	withTempDir,
+} from '../support/harness.js';
 
 /** The reaper this package spawns, so a stub can refuse it by name without touching the guarded processes. */
 const REAPER_SCRIPT = path.join(REPO_ROOT, 'src', 'reaper.js');
+
+/** What rename(2) onto a directory reports. The Windows half is an expectation this machine cannot check;
+ * its CI leg settles which code arrives, and a wrong guess fails that step rather than passing quietly. */
+const RENAME_ONTO_DIR = WINDOWS ? /EISDIR|EPERM|EACCES/ : /EISDIR/;
 
 /** @param {string} tag @param {string} [name] */
 const declare = (tag, name = 'agent') => ({ name, binaryPath: process.execPath, args: [fixture('idle.js'), tag] });
@@ -236,7 +249,7 @@ test('a claimLock failure while launching the reaper does not take the already-s
 		withSpawn(async ({ spawn }) => {
 			// A directory sitting where the reaper's own lock file must go: claimLock reads it as unheld
 			// (readLock cannot open a directory as a file) and then tries to rename its claim onto it, which
-			// throws EISDIR - a real, non-EEXIST filesystem error claimLock cannot resolve on its own.
+			// throws - a real, non-EEXIST filesystem error claimLock cannot resolve on its own.
 			fs.mkdirSync(lockPath(dir, 'reaper'));
 			const result = await guard({
 				pidDir: dir,
@@ -251,7 +264,7 @@ test('a claimLock failure while launching the reaper does not take the already-s
 					'the reaper lock failure took an already-started process down with it'
 				);
 				assert.equal(result.reaper?.started, false);
-				assert.match(result.reaper?.error ?? '', /EISDIR/);
+				assert.match(result.reaper?.error ?? '', RENAME_ONTO_DIR);
 			} finally {
 				result.stop();
 			}
@@ -310,8 +323,13 @@ test('a version that has moved makes the running process an orphan rather than s
 				assert.equal(after.processes[0]?.adopted, false, 'the upgrade adopted the previous release');
 				assert.notEqual(after.processes[0]?.pid, old);
 				assert.match(after.report.join('\n'), /orphan of an earlier configuration \(version 1, not 2\)/);
-				// Left running, because stopOrphans is off: the guard reports it rather than signalling it.
+				// Left running, because stopOrphans is off: the guard reports it rather than signalling it. The
+				// orphan and its replacement share a command line, which is the one place here that counts past one.
 				assert.equal(isAlive(/** @type {number} */ (old)), true);
+				await waitFor(
+					() => countRunning([process.execPath, fixture('idle.js'), tag]) === 2,
+					'the orphan and its replacement to both be running'
+				);
 				assert.equal(readLock(lockPath(dir, 'agent'))?.version, 2);
 			} finally {
 				after.stop();

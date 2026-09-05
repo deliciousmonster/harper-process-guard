@@ -10,8 +10,8 @@ Harper v5 is the host it was built against, whose `runOnMainThread` means "also 
 "only once"; nothing in `src/` knows that, so any host of the same shape can use it.
 
 It imports `node:` builtins and nothing else, and there is no build step: what is written is what
-ships. Node ^22.18 or >=24, on Linux or darwin. The identification everything here rests on has no
-third implementation, and Identity below says what that costs.
+ships. Node ^22.18 or >=24, on Linux, darwin or Windows. The identification everything here rests on
+has one implementation per platform, and Identity below says what that costs and what Windows changes.
 
 ## Install
 
@@ -109,13 +109,32 @@ rounds.
 
 `/proc/<pid>/exe` is kernel-set and unspoofable, and useless here: it resolves to the interpreter, so
 every node script on the box reads identical. Identity is the command line instead: `/proc/<pid>/cmdline`
-on Linux, `ps` on darwin, compared as a leading run of the process's own vector, so pinning more of it
-can only ever narrow a verdict. An empty expectation identifies nothing.
+on Linux, `ps` on darwin, `Get-CimInstance Win32_Process` on Windows, compared as a leading run of the
+process's own vector, so pinning more of it can only ever narrow a verdict. An empty expectation
+identifies nothing.
 
-Nothing is signalled without a positive match. On a platform that is neither Linux nor darwin every
-pid reads as unidentifiable, so nothing is ever signalled there- and a thread will not join a process
-it cannot identify either. It takes the lock and starts its own. One winner per node is a Linux and
-darwin guarantee.
+Nothing is signalled without a positive match. On a platform none of those three covers every pid
+reads as unidentifiable, so nothing is ever signalled there- and a thread will not join a process it
+cannot identify either. It takes the lock and starts its own, which is the double start this package
+exists to prevent, so `os` in package.json refuses the install there rather than letting that pass for
+a working guard.
+
+### Windows, and what has not been proved about it
+
+The win32 path has never run on Windows. It is written from libuv's `src/win/process.c` and the
+`Win32_Process` contract, and the windows-latest leg of the Test workflow is what settles it.
+
+Windows keeps no argv, only the one string libuv built, and libuv quotes any argument holding a space,
+a tab or a quote. The recorded vector is quoted the same way before the two are compared, so a process
+under `C:\Program Files` still identifies. Quoting it wrong yields `differs`, which starts a second
+process rather than signalling a stranger; that direction is deliberate.
+
+Two behaviours differ there whatever CI reports, because the platform has no other answer.
+`process.kill(pid, 'SIGTERM')` is `TerminateProcess`, so the target's handler never runs: a reaper
+stopped that way leaves its own lock behind, and a process an operator stopped is indistinguishable
+from one that crashed, so supervision restarts it up to `restartMax`. One command-line lookup also
+costs a PowerShell start rather than the few milliseconds `ps` costs, which is why liveness polling
+never goes through it and why only a lock claim and a reap target pay for one.
 
 ### Adoption, respawn, stopping
 

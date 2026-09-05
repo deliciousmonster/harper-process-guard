@@ -6,12 +6,28 @@ import path from 'node:path';
 import test from 'node:test';
 import { Worker } from 'node:worker_threads';
 
-import { argvOf, isAlive } from '../../src/identity.js';
+import { argvOf, IDENTIFY_BUDGET_MS, isAlive } from '../../src/identity.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from '../../src/lock.js';
-import { deadPid, fixture, pidOf, readyLine, seedLock, waitFor, withSpawn, withTempDir } from '../support/harness.js';
+import {
+	deadPid,
+	fixture,
+	pidOf,
+	readyLine,
+	seedLock,
+	settle,
+	skipOnWindows,
+	slow,
+	waitFor,
+	WINDOWS,
+	withSpawn,
+	withTempDir,
+} from '../support/harness.js';
 
 const THREADS = 8;
-const ROUNDS = 300;
+// Every loser identifies the winner's pid, which on Windows is a PowerShell start rather than a `ps`:
+// 300 rounds would cost about ten minutes there. The measured defect was 23 rounds in 300, so 60 rounds
+// still meets it several times over; the test name reports whichever count ran.
+const ROUNDS = WINDOWS ? 60 : 300;
 const ROUND = 0;
 const WINNERS = 1;
 const FINISHED = 2;
@@ -22,7 +38,7 @@ async function reach(ctl, index, want) {
 	for (;;) {
 		const seen = Atomics.load(ctl, index);
 		if (seen >= want) return;
-		const waited = Atomics.waitAsync(ctl, index, seen, 10_000);
+		const waited = Atomics.waitAsync(ctl, index, seen, slow(10_000));
 		if (waited.async) await waited.value;
 		else if (waited.value === 'timed-out') throw new Error(`only ${seen} of ${want} threads reported in`);
 	}
@@ -30,7 +46,8 @@ async function reach(ctl, index, want) {
 
 test(
 	`${ROUNDS} races of ${THREADS} worker threads over a stale lock produce exactly one winner each`,
-	{ timeout: 120_000 },
+	// Windows does far more filesystem work per gate than either POSIX host, so the ceiling moves with it.
+	{ timeout: slow(120_000) },
 	async () => {
 		// The measured defect was 23 of 300 rounds with more than one winner, and every one of those came
 		// from removing the stale lock before recreating it. Move publish() out of the underGate callback,
@@ -184,9 +201,17 @@ test('stopOrphans signals that same orphan, and says so without claiming an outc
 
 test(
 	'an orphan that ignores SIGTERM is signalled once and the lock taken in the same pass, so the caller returns',
-	{ timeout: 10_000 },
-	() =>
-		withTempDir('guard-lock-', async (dir) =>
+	{ timeout: slow(10_000) },
+	(t) => {
+		if (
+			skipOnWindows(
+				t,
+				'nothing on Windows can ignore a terminate, so an orphan that outlives its SIGTERM cannot be arranged; ' +
+					'that the claimant signals once, takes the lock in the same pass and chases nothing goes uncovered there.'
+			)
+		)
+			return;
+		return withTempDir('guard-lock-', async (dir) =>
 			withSpawn(async ({ spawn }) => {
 				// Nothing here can make this process exit, so only the claimant's own structure ends the call.
 				// Waiting out a grace period and re-adjudicating never terminated: the verdict never changed.
@@ -210,7 +235,8 @@ test(
 				assert.equal(isAlive(pidOf(child)), true, 'something escalated past the one SIGTERM');
 				assert.match(claim.notes.join('\n'), /nothing chases it if it ignores the signal/);
 			})
-		)
+		);
+	}
 );
 
 test('an unfinished claim whose host is dead is taken over', () =>
@@ -234,7 +260,7 @@ test('an unfinished claim whose host is alive is waited on, not raced', () =>
 				settled = true;
 				return result;
 			});
-			await new Promise((resolve) => setTimeout(resolve, 100));
+			await settle(100);
 			assert.equal(settled, false, 'the waiter raced a live claim instead of waiting on it');
 
 			// The claimant names its process, and the waiter joins that rather than starting a second one.
@@ -265,7 +291,7 @@ test('an unfinished claim outlives its budget and is taken over, so one wedged t
 
 test(
 	'a gate held by a live process is broken once the budget runs out, so a claim cannot wait on it forever',
-	{ timeout: 5000 },
+	{ timeout: slow(5000) },
 	() =>
 		withTempDir('guard-lock-', async (dir) => {
 			// What a thread killed inside the gate leaves behind, and what a recycled pid looks like. The
@@ -275,7 +301,7 @@ test(
 			const started = Date.now();
 			const claim = await claimLock({ pidDir: dir, name: 'gated', version: 1, argv: ['/bin/thing'], timeoutMs: 200 });
 			assert.equal(claim.outcome, 'won');
-			assert.ok(Date.now() - started < 2000, `a 200ms budget took ${Date.now() - started}ms`);
+			assert.ok(Date.now() - started < slow(2000), `a 200ms budget took ${Date.now() - started}ms`);
 			assert.equal(fs.existsSync(`${lockPath(dir, 'gated')}.claiming`), false, 'the gate was left behind');
 		})
 );
@@ -336,3 +362,30 @@ test('a lock file with no guard record reads as a lock with no record, not as a 
 		fs.writeFileSync(file, 'not-a-pid\n');
 		assert.equal(readLock(file), null);
 	}));
+
+test(
+	'a writer waits out the longest identification before it breaks a gate, so no live thread is left inside one',
+	// Costs IDENTIFY_BUDGET_MS + the margin in wall clock, because the wait it measures is the subject.
+	{ timeout: slow(30_000) },
+	() =>
+		withTempDir('guard-lock-', async (dir) => {
+			// claimLock identifies inside the gate and identify() may take a whole IDENTIFY_BUDGET_MS; a writer
+			// that broke it first puts two threads in one decision. The holder is live, so only the budget clears it.
+			const file = lockPath(dir, 'held');
+			seedLock(file, { pid: process.pid, token: 'ours', argv: ['/bin/thing'] });
+			fs.writeFileSync(`${file}.claiming`, String(process.pid), 'utf-8');
+
+			const started = Date.now();
+			assert.equal(await commitLock(file, 'ours', 4242, 1, ['/bin/thing']), true, 'the write never landed');
+			const waited = Date.now() - started;
+
+			// The probe is not all the gate covers: a kill, a write and a rename follow it, and a loaded host
+			// schedules each of them. A writer clearing the budget by a millisecond has no margin at all.
+			const rest = 500;
+			assert.ok(
+				waited >= IDENTIFY_BUDGET_MS + rest,
+				`the gate was broken after ${waited}ms, inside a ${IDENTIFY_BUDGET_MS}ms identification`
+			);
+			assert.equal(readLock(file)?.pid, 4242);
+		})
+);

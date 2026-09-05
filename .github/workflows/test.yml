@@ -13,7 +13,7 @@ on:
 permissions:
   contents: read
 
-# A superseded push must not run the four-leg matrix beside its replacement; main never cancels. Via
+# A superseded push must not run the six-leg matrix beside its replacement; main never cancels. Via
 # workflow_call the group takes the caller's name, so it never collides with publish.yml's per-ref group.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
@@ -25,8 +25,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Both platforms on purpose: several e2e cases assert different outcomes per platform, and that divergence is the design, not flake.
-        os: [ubuntu-latest, macos-latest]
+        # Exactly the platforms src/identity.js can read a command line on, and the same set package.json's `os` claims.
+        # Several cases assert different outcomes per platform, so the divergence is the design rather than flake.
+        os: [ubuntu-latest, macos-latest, windows-latest]
         # Harper v5 declares engines.node "^22.18.0 || >=24.0.0", so 22 and 24 are the two versions that exist in the field.
         node: ['22', '24']
     runs-on: ${{ matrix.os }}
@@ -59,6 +60,7 @@ jobs:
         run: npm test
 
       # node --test exits 0 when its pattern matches nothing, so a renamed directory would turn the step above into a no-op that reports success.
+      # It counts files on disk, NOT tests executed: a glob the runner's shell mangled would still pass here, which is what to read the run's own output for.
       - name: Guard against an empty test glob
         shell: bash
         run: |

@@ -6,13 +6,15 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 
-import { errnoCode, errorMessage, identify, isAlive } from './identity.js';
+import { errnoCode, errorMessage, identify, IDENTIFY_BUDGET_MS, isAlive } from './identity.js';
 
 /** How long a thread waits before looking again at another thread's unfinished claim, which is one file read. */
 const CLAIM_POLL_MS = 2;
-/** The gate is held across a read, at most one signal, and a rename, so a live holder is never in it long. */
+/** A free gate is usually a read, at most one signal and a rename away, so a waiter looks again at once. */
 const GATE_RETRY_MS = 1;
-const GATE_WAIT_MS = 2000;
+// Above identity.js's IDENTIFY_BUDGET_MS, because adjudicate identifies INSIDE the gate: a writer that gave
+// up first would break a gate a live thread is still in, and both would then decide one lock at once.
+const GATE_WAIT_MS = IDENTIFY_BUDGET_MS + 1000;
 const GATE_SUFFIX = '.claiming';
 
 /**
@@ -318,8 +320,8 @@ export async function safeLockWrite(write) {
 
 /** @param {string} path @param {(held: Lock | null) => boolean} write @returns {Promise<boolean>} */
 async function writeUnderGate(path, write) {
-	// A gate is held for two syscalls, so this waits it out rather than giving up. The budget matters
-	// only when the process holding it died mid-decision.
+	// A gate is held across an identification at worst, so this waits that out rather than giving up. The
+	// budget matters only when the thread holding it died mid-decision, or wedged inside one.
 	const deadline = Date.now() + GATE_WAIT_MS;
 	for (;;) {
 		const done = underGate(path, Date.now() >= deadline, () => write(readLock(path)));
