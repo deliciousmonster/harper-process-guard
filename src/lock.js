@@ -86,8 +86,17 @@ export function readLock(path) {
 	return lock;
 }
 
-/** Replace the lock where it stands. rename(2) is atomic, so a reader meets the old one or the new one. @param {string} path @param {Lock} lock */
-function publish(path, lock) {
+/**
+ * Replace the lock where it stands, signalling the orphan it names first. rename(2) is atomic, so a
+ * reader meets the old lock or the new one. The two steps live in one function because their ORDER is
+ * the property: the write erases the only record of `stop`, so a host that dies between them must
+ * leave the lock still naming the orphan. Nothing observes that window from outside the process, so
+ * there is no test to hold the order - keeping them inseparable here is what does.
+ *
+ * @param {string} path @param {Lock} lock @param {number} [stop] Pid to SIGTERM before the lock stops naming it.
+ */
+function publish(path, lock, stop) {
+	if (stop !== undefined) signal(stop);
 	const temp = `${path}.${lock.token}.tmp`;
 	writeFileSync(temp, serialise(lock), 'utf-8');
 	try {
@@ -249,10 +258,9 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 		const verdict = underGate(path, expired, () => {
 			const decision = adjudicate(readLock(path), { name, version, argv, stopOrphans, expired, notes });
 			if (decision.act !== 'take') return decision;
-			// Signalled before the claim overwrites the pid it names, and inside the gate because that is
-			// what keeps a sibling thread from reading a dying pid and adopting a corpse.
-			if (decision.stop !== undefined) signal(decision.stop);
-			publish(path, { pid: 0, version, token, host: process.pid, argv });
+			// Inside the gate, so no sibling thread can read a dying pid and adopt a corpse. publish sends
+			// the signal itself, which is what keeps it ahead of the write that erases the pid.
+			publish(path, { pid: 0, version, token, host: process.pid, argv }, decision.stop);
 			return decision;
 		});
 
