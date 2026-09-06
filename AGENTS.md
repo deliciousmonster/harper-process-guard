@@ -23,7 +23,9 @@ None of these are style, and README.md explains each:
   detector inside `underGate` over 300 rounds of 8 worker threads: 0 overlaps at the 5000ms budget the
   race test uses, and 272 at a 10ms budget, where the deliberate break fires 782 times.
 - Nothing is signalled without a positive identification, and "cannot tell" never reads as "not
-  ours". An empty expectation identifies nothing.
+  ours". An empty expectation identifies nothing. Since 623c59c the rule also covers the lock itself:
+  an `unknown` verdict waits for the claim's deadline rather than taking the lock, because taking it
+  starts a second process for a pid that is most likely the first.
 - The kill path is opt-in and off by default: `stopOrphans`, and launching a reaper at all. Removing
   a stale lock signals nothing and fixes the defect; a signal sent on a wrong identification cannot
   be taken back.
@@ -33,6 +35,11 @@ None of these are style, and README.md explains each:
   reaps a containerised host on sight.
 - The reaper removes a lock before signalling what it names, and it is spawned by path, never
   imported.
+- That removal is why a joiner whose process died and whose lock is gone must still restart it, if the
+  host that owned the lock is dead. The two rules were written apart and contradicted each other until
+  3b7ca4d: the reaper removes the lock BECAUSE it expects a survivor to replace the process, and the
+  survivor declined BECAUSE the lock was gone, so the node supervised nothing with `restarts` at 0 and
+  no error set. A joiner whose owner is still alive stands down; that owner answered the death.
 - `spawn` comes from the caller. That is what makes the guard testable with a fake and usable by a
   host that constrains `child_process`.
 - A double stands in for an external boundary (`spawn`, the filesystem, a real child process) and
@@ -53,7 +60,9 @@ a manual step on the author, not something CI enforces.
 Five files under `src/`, plain ESM with `// @ts-check` and JSDoc:
 
 - `identity.js` — one `inspect()` per pid answering liveness and command line together, because on
-  darwin each separate question costs a `ps` and these run on every poll. `argvOf` has no caller in
+  darwin each separate question costs a `ps` and these run on every poll. Three platform branches:
+  `/proc` on linux, `ps` on darwin, and a PowerShell CIM probe on win32 that costs roughly two orders
+  of magnitude more, which is why `inspect` takes `withCommandLine` and `isAlive` passes false. `argvOf` has no caller in
   `src/`: it is the seam a test waits on for a pid to appear in the process table with its command
   line, which `isAlive` cannot express and `identify` can only answer against an expectation.
 - `lock.js` — the gate, the adjudication, and the three writes (`claimLock`, `commitLock`,

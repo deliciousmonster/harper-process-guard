@@ -393,7 +393,7 @@ test('commitLock refuses once the lock has changed hands', () =>
 		if (claim.outcome !== 'won') return;
 		seedLock(lockPath(dir, 'moved'), { pid: 4242, token: 'somebody-else', version: 1, argv: ['/bin/thing'] });
 
-		assert.equal(await commitLock(lockPath(dir, 'moved'), claim.token, 777, 1, ['/bin/thing']), false);
+		assert.equal(await commitLock(lockPath(dir, 'moved'), claim.token, 777, 1, ['/bin/thing']), 'taken');
 		assert.equal(readLock(lockPath(dir, 'moved'))?.pid, 4242, "a lost claimant stamped its pid on the winner's lock");
 	}));
 
@@ -403,9 +403,9 @@ test('releaseLock removes only its own lock', () =>
 		assert.equal(claim.outcome, 'won');
 		if (claim.outcome !== 'won') return;
 
-		assert.equal(await releaseLock(lockPath(dir, 'released'), 'not-my-token'), false);
+		assert.equal(await releaseLock(lockPath(dir, 'released'), 'not-my-token'), 'taken');
 		assert.equal(fs.existsSync(lockPath(dir, 'released')), true);
-		assert.equal(await releaseLock(lockPath(dir, 'released'), claim.token), true);
+		assert.equal(await releaseLock(lockPath(dir, 'released'), claim.token), 'written');
 		assert.equal(fs.existsSync(lockPath(dir, 'released')), false);
 	}));
 
@@ -421,6 +421,19 @@ test('safeLockWrite reports a resolved false from commitLock, not the silent suc
 		const failure = await safeLockWrite(commitLock(lockPath(dir, 'stolen'), claim.token, 777, 1, ['/bin/thing']));
 		assert.equal(failure, 'the lock changed hands before this write landed');
 		assert.equal(readLock(lockPath(dir, 'stolen'))?.pid, 4242, "a lost claimant's commit stamped the winner's lock");
+	}));
+
+test('safeLockWrite tells a lock that is gone from one another thread took, which are not the same event', () =>
+	withTempDir('guard-lock-', async (dir) => {
+		const claim = await claimLock({ pidDir: dir, name: 'vanished', version: 1, argv: ['/bin/thing'] });
+		assert.equal(claim.outcome, 'won');
+		if (claim.outcome !== 'won') return;
+		// What a reaper leaves behind: it removes a lock before signalling what it names, so the owner's
+		// own release finds nothing. Reporting that as a handover names a thread that does not exist.
+		fs.rmSync(lockPath(dir, 'vanished'));
+
+		const failure = await safeLockWrite(releaseLock(lockPath(dir, 'vanished'), claim.token));
+		assert.equal(failure, 'the lock was already gone when this write landed');
 	}));
 
 test('a lock file with no guard record reads as a lock with no record, not as a parse failure', () =>
@@ -447,7 +460,7 @@ test(
 			fs.writeFileSync(`${file}.claiming`, String(process.pid), 'utf-8');
 
 			const started = Date.now();
-			assert.equal(await commitLock(file, 'ours', 4242, 1, ['/bin/thing']), true, 'the write never landed');
+			assert.equal(await commitLock(file, 'ours', 4242, 1, ['/bin/thing']), 'written', 'the write never landed');
 			const waited = Date.now() - started;
 
 			// The probe is not all the gate covers: a kill, a write and a rename follow it, and a loaded host

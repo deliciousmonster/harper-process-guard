@@ -276,18 +276,22 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 	}
 }
 
+/** What a gated write did: wrote it, found the lock absent, or found another token holding it. */
+/** @typedef {'written' | 'gone' | 'taken'} WriteOutcome */
+
 /**
  * Record the pid this claim started, while the lock is still ours. A claimant that was taken over must
  * not stamp its pid onto the winner's file.
  *
  * @param {string} path @param {string} token @param {number} pid @param {number} version @param {readonly string[]} argv
- * @returns {Promise<boolean>}
+ * @returns {Promise<WriteOutcome>}
  */
 export function commitLock(path, token, pid, version, argv) {
 	return writeUnderGate(path, (held) => {
-		if (held?.token !== token) return false;
+		if (held === null) return 'gone';
+		if (held.token !== token) return 'taken';
 		publish(path, { pid, version, token, host: process.pid, argv });
-		return true;
+		return 'written';
 	});
 }
 
@@ -295,13 +299,14 @@ export function commitLock(path, token, pid, version, argv) {
  * Remove the lock only while it is still ours. This is the one place a lock is removed rather than
  * replaced: the process it named was shut down on purpose, and nothing should adopt it.
  *
- * @param {string} path @param {string} token @returns {Promise<boolean>}
+ * @param {string} path @param {string} token @returns {Promise<WriteOutcome>}
  */
 export function releaseLock(path, token) {
 	return writeUnderGate(path, (held) => {
-		if (held?.token !== token) return false;
+		if (held === null) return 'gone';
+		if (held.token !== token) return 'taken';
 		unlinkQuietly(path);
-		return true;
+		return 'written';
 	});
 }
 
@@ -311,17 +316,23 @@ export function releaseLock(path, token) {
  * resolved `false` is as much a failure as a throw: it means the token this caller held no longer
  * matched what commitLock or releaseLock found on disk, so nothing was written.
  *
- * @param {Promise<boolean>} write @returns {Promise<string | undefined>} The failure message, or undefined.
+ * @param {Promise<WriteOutcome>} write @returns {Promise<string | undefined>} The failure message, or undefined.
  */
 export async function safeLockWrite(write) {
 	try {
-		return (await write) ? undefined : 'the lock changed hands before this write landed';
+		const outcome = await write;
+		if (outcome === 'written') return undefined;
+		// Two different states, and only one of them is a handover: a lock that is absent was removed by
+		// the reaper or by a sibling's release, and naming that a handover invents a thread nobody has.
+		return outcome === 'gone'
+			? 'the lock was already gone when this write landed'
+			: 'the lock changed hands before this write landed';
 	} catch (error) {
 		return errorMessage(error);
 	}
 }
 
-/** @param {string} path @param {(held: Lock | null) => boolean} write @returns {Promise<boolean>} */
+/** @param {string} path @param {(held: Lock | null) => WriteOutcome} write @returns {Promise<WriteOutcome>} */
 async function writeUnderGate(path, write) {
 	// A gate is held across an identification at worst, so this waits that out rather than giving up. The
 	// budget matters only when the thread holding it died mid-decision, or wedged inside one.
