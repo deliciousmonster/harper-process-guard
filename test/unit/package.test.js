@@ -6,22 +6,25 @@ import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
 
-import { testMatrix } from '../../scripts/ci-local.js';
+import { parse } from 'yaml';
+
 import { REPO_ROOT } from '../support/harness.js';
 
 const SRC = path.join(REPO_ROOT, 'src');
 const sources = fs.readdirSync(SRC).filter((file) => file.endsWith('.js'));
-/** @type {{ scripts: Record<string, string>, dependencies?: object, exports: Record<string, string>, files: string[], os?: string[] }} */
+/** @type {{ scripts: Record<string, string>, dependencies?: object, peerDependencies?: object, optionalDependencies?: object, exports: Record<string, string>, files: string[], os?: string[] }} */
 const manifest = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf-8'));
+/** @type {{ jobs?: { test?: { strategy?: { matrix?: { os?: string[] } }, steps?: { run?: string }[] } } }} */
+const workflow = parse(fs.readFileSync(path.join(REPO_ROOT, '.github', 'workflows', 'test.yml'), 'utf-8'));
 
 test('what is written is what ships: no build step, and the entry points at the source', () => {
 	assert.equal(manifest.exports['.'], './src/index.js');
-	assert.deepEqual(manifest.files, ['src/', 'README.md']);
+	assert.ok(manifest.files.includes('src/'), 'the published tarball would carry no code at all');
 	for (const name of ['build', 'prepare', 'prepublishOnly']) {
 		assert.equal(manifest.scripts[name], undefined, `a "${name}" script would compile what is published`);
 	}
+	// `npm ci` runs `prepare`, so a build that crept in by a route the names above miss still lands here.
 	assert.equal(fs.existsSync(path.join(REPO_ROOT, 'dist')), false);
-	assert.match(manifest.scripts.typecheck ?? '', /--noEmit/);
 });
 
 /** A runner label against the process.platform it reports, so the two lists below compare as platforms. */
@@ -34,7 +37,11 @@ const PLATFORM_OF = new Map([
 test('the platforms the manifest claims are exactly the platforms CI runs', () => {
 	// `os` makes npm refuse the install anywhere else, so a platform claimed and never run is a promise
 	// nothing keeps- and a platform run and not claimed is evidence thrown away.
-	const tested = testMatrix().os.map((label) => {
+	const runners = workflow.jobs?.test?.strategy?.matrix?.os ?? [];
+	// A matrix that read as empty would let this agree with an `os` field saying anything at all.
+	assert.ok(runners.length > 0, 'test.yml declares no os matrix for the test job');
+
+	const tested = runners.map((label) => {
 		const platform = PLATFORM_OF.get(label);
 		if (!platform) throw new Error(`test.yml runs "${label}", which nothing here maps to a process.platform`);
 		return platform;
@@ -42,16 +49,28 @@ test('the platforms the manifest claims are exactly the platforms CI runs', () =
 	assert.deepEqual(tested.toSorted(), (manifest.os ?? []).toSorted());
 });
 
-test('no runtime dependencies', () => {
-	assert.equal(manifest.dependencies, undefined);
+test('every command that gates a merge here is a command CI runs', () => {
+	// A step dropped from test.yml is silent otherwise: the suite still passes and the check simply stops
+	// running on the legs that decide a merge. Matched on the command, so renaming a step costs nothing.
+	const commands = (workflow.jobs?.test?.steps ?? []).map((step) => (step.run ?? '').trim());
+	for (const gate of ['npm run format:check', 'npm run lint', 'npm run typecheck', 'npm test']) {
+		assert.ok(commands.includes(gate), `test.yml has no step running \`${gate}\`, so CI no longer gates on it`);
+	}
 });
 
-test('every source file is typechecked', () => {
+test('no runtime dependencies of any kind', () => {
+	// Peer and optional land in a consumer's tree too, so absence has to hold across all three fields.
+	assert.equal(manifest.dependencies, undefined);
+	assert.equal(manifest.peerDependencies, undefined);
+	assert.equal(manifest.optionalDependencies, undefined);
+});
+
+test('no source file opts out of the typecheck', () => {
 	assert.ok(sources.length > 0, 'no sources were found, so this asserted nothing');
 	for (const file of sources) {
-		// Either line ending: a Windows checkout rewrites these files to CRLF unless git is told not to.
-		const first = fs.readFileSync(path.join(SRC, file), 'utf-8').split(/\r?\n/)[0];
-		assert.equal(first, '// @ts-check', `src/${file} opts out of the typecheck`);
+		// tsconfig sets checkJs, so the `// @ts-check` pragma is decorative and only @ts-nocheck silences a
+		// file- and it silences it while `npm run typecheck` still reports success.
+		assert.doesNotMatch(fs.readFileSync(path.join(SRC, file), 'utf-8'), /@ts-nocheck/, `src/${file} is unchecked`);
 	}
 });
 

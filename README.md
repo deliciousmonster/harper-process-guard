@@ -197,5 +197,5 @@ so in the report, and left no lock behind.
 ## Development
 
 `src/` is plain ESM with `// @ts-check` and JSDoc, and nothing here is built. `npm test` spawns real
-processes and real worker threads, and `npm run ci:local` runs the Test workflow's own steps against
-the working tree. `AGENTS.md` is what to read before changing any of it.
+processes and real worker threads, and CI runs that suite on six legs: Linux, macOS and Windows
+against Node 22 and 24. `AGENTS.md` is what to read before changing any of it.

@@ -45,7 +45,7 @@ A green suite is not a review here. Each property above can be broken in ways a 
 passes, so a change to the semantics of `lock.js`, `supervise.js` or `reaper.js` gets an adversarial
 review before merging, and each new or changed test gets mutation-checked by hand: revert the
 production change the test exists for, confirm the test goes red, restore it, confirm green. No
-mutation-testing tool is wired into this repo - `package.json` and `scripts/` carry none - so this is
+mutation-testing tool is wired into this repo - `package.json` carries none - so this is
 a manual step on the author, not something CI enforces.
 
 ## Layout
@@ -82,9 +82,9 @@ suite has to wait out a production backoff schedule.
 
 `npm test` runs `node --test` with no build. `npm run typecheck` is `tsc --noEmit` and never emits;
 there is no `dist/`, no build step and no runtime dependency, and `test/unit/package.test.js` fails
-if any of those change. `npm run ci:local` executes the test job's own steps, extracted from
-`test.yml` at run time, so the local gate and CI cannot drift; `test/unit/ci-local.test.js` pins the
-extraction and the excuse list.
+if any of those change. The local gate is those commands run directly, `format:check`, `lint`,
+`typecheck` and `test`, which is what `test.yml` runs too; `package.test.js` reads that workflow so
+neither the platform matrix nor the set of gate commands can drift from what is declared here.
 
 The suites spawn real processes and real worker threads. A fixture must not set `process.title`: the
 command line is how instances are identified and counted, and rewriting argv erases the only identity

@@ -40,8 +40,9 @@ export function errorMessage(error) {
  * @returns {{ alive: boolean, argv: string[] | null } | null}
  */
 export function parseCimAnswer(stdout) {
-	// PowerShell may put a BOM in front of redirected output; the marker still has to start the answer.
-	const text = stdout.replace(/^\uFEFF/, '').trim();
+	// trim() removes the BOM PowerShell prefixes redirected output with (U+FEFF is whitespace) as well as
+	// the trailing CRLF, so the marker is matched against the answer alone.
+	const text = stdout.trim();
 	if (text === GONE) return { alive: false, argv: null };
 	if (text !== LIVE && !text.startsWith(`${LIVE} `)) return null;
 	const commandLine = text.slice(LIVE.length).trim();

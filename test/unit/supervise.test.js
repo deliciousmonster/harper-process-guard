@@ -2,17 +2,21 @@
 // The four defects green unit suites missed: a joiner that supervises nothing, a death nothing
 // restarts, a joiner reporting a dead process as healthy, and a process nobody stops.
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import { argvOf, isAlive } from '../../src/identity.js';
 import { lockPath, readLock } from '../../src/lock.js';
 import { superviseProcess, watchPid } from '../../src/supervise.js';
 import {
 	context,
+	deadPid,
 	fixture,
 	pidOf,
+	REPO_ROOT,
 	seedLock,
 	settle,
 	skipAsRoot,
@@ -36,11 +40,12 @@ function descriptorFor(name, script, args = []) {
  * race meets: something already running that it did not start.
  *
  * @param {string} dir @param {import('../../src/supervise.js').Spawn} spawn @param {ReturnType<typeof descriptorFor>} descriptor
+ * @param {number} [host] Pid recorded as the lock's holder. This process by default, which is alive by definition.
  */
-async function alreadyRunning(dir, spawn, descriptor) {
+async function alreadyRunning(dir, spawn, descriptor, host = process.pid) {
 	const child = spawn(descriptor.binaryPath, [...descriptor.args], { stdio: 'ignore' });
 	await waitFor(() => argvOf(pidOf(child)) !== null, 'the running process to appear in the process table');
-	seedLock(lockPath(dir, descriptor.name), { pid: pidOf(child), version: 1, argv: descriptor.argv });
+	seedLock(lockPath(dir, descriptor.name), { pid: pidOf(child), version: 1, host, argv: descriptor.argv });
 	return child;
 }
 
@@ -167,6 +172,68 @@ test('a death whose lock is already gone was answered by someone else, so no rep
 		})
 	));
 
+test('a joiner whose host holder is gone starts the replacement nobody is left to start', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn, calls }) => {
+			const ctx = context(dir, spawn);
+			const descriptor = descriptorFor('reaped', 'idle.js');
+			try {
+				// What a reaper leaves after the host it watched died: the lock removed, then its process
+				// signalled. The holder recorded on that lock is gone, so nothing on this node will answer.
+				const running = await alreadyRunning(dir, spawn, descriptor, await deadPid());
+				const state = await superviseProcess(ctx, descriptor);
+				assert.equal(state.adopted, true);
+				const before = calls.length;
+
+				fs.unlinkSync(lockPath(dir, 'reaped'));
+				running.kill('SIGKILL');
+				await waitFor(() => calls.length > before, 'the surviving thread to start a replacement');
+				await waitFor(() => state.started && state.pid !== pidOf(running), 'the state to name the replacement');
+
+				assert.equal(isAlive(/** @type {number} */ (state.pid)), true);
+				assert.equal(readLock(lockPath(dir, 'reaped'))?.pid, state.pid);
+				assert.equal(state.restarts, 1, `a restart the state never counted: ${state.restarts}`);
+			} finally {
+				ctx.run.stopping = true;
+			}
+		})
+	));
+
+test('four joiners a dead host left behind answer one death, and the lock still keeps it to one process', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn, calls }) => {
+			const descriptor = descriptorFor('contended', 'idle.js');
+			const contexts = Array.from({ length: 4 }, () => context(dir, spawn));
+			try {
+				const running = await alreadyRunning(dir, spawn, descriptor, await deadPid());
+				const states = await Promise.all(contexts.map((ctx) => superviseProcess(ctx, descriptor)));
+				assert.deepEqual(
+					states.map((state) => state.adopted),
+					[true, true, true, true]
+				);
+				const before = calls.length;
+
+				fs.unlinkSync(lockPath(dir, 'contended'));
+				running.kill('SIGKILL');
+				await waitFor(() => calls.length > before, 'a replacement to be started');
+				await settle(400);
+
+				// Every one of the four now restarts where it used to decline, so this is the contention the
+				// fix introduced: going back through the lock is the only thing keeping it to one process.
+				assert.equal(calls.length - before, 1, `${calls.length - before} starts answered one death`);
+				const replacement = readLock(lockPath(dir, 'contended'))?.pid;
+				assert.equal(isAlive(replacement ?? -1), true);
+				assert.deepEqual(
+					[...new Set(states.map((state) => state.pid))],
+					[replacement],
+					'the four threads ended up on different processes'
+				);
+			} finally {
+				for (const ctx of contexts) ctx.run.stopping = true;
+			}
+		})
+	));
+
 test('a process that crashes while the host keeps running is restarted', () =>
 	withTempDir('guard-sup-', (dir) =>
 		withSpawn(async ({ spawn, calls }) => {
@@ -193,6 +260,33 @@ test('a clean exit is a shutdown, so it is not restarted and the lock goes', () 
 
 				assert.equal(calls.length, 1, 'a deliberate shutdown was restarted');
 				assert.equal(fs.existsSync(lockPath(dir, 'clean')), false, 'the lock outlived a deliberate shutdown');
+			} finally {
+				ctx.run.stopping = true;
+			}
+		})
+	));
+
+test('a deliberate exit whose lock is already gone is a shutdown, not a handover to a thread nothing names', () =>
+	withTempDir('guard-sup-', (dir) =>
+		withSpawn(async ({ spawn, calls }) => {
+			const ctx = context(dir, spawn);
+			try {
+				const state = await superviseProcess(ctx, descriptorFor('vanished', 'quits.js', ['0', '300']));
+				assert.equal(state.started, true);
+
+				// Removed under the owner, which is what a reaper of a host that has since come back leaves.
+				// Absent is not "another token", so there is no other thread for this shutdown to be blamed on.
+				fs.unlinkSync(lockPath(dir, 'vanished'));
+				await waitFor(() => state.exited, 'the clean exit');
+				await settle(150);
+
+				assert.match(ctx.log.lines.info.join('\n'), /was shut down \(exit code 0\); not restarting it/);
+				assert.equal(
+					ctx.log.lines.warn.join('\n').includes('by whatever now holds'),
+					false,
+					'a lock nothing holds was reported as a thread taking the process over'
+				);
+				assert.equal(calls.length, 1, 'a deliberate shutdown was restarted');
 			} finally {
 				ctx.run.stopping = true;
 			}
@@ -390,6 +484,25 @@ test(
 			})
 		)
 );
+
+// Driven from a child process because no in-suite test can express it: node:test keeps its own work on
+// the event loop, so an unref'd timer still fires there and the assertion passes either way.
+test('the start-failure timer settles even when it is the only thing left on the event loop', () =>
+	withTempDir('guard-hold-', async (dir) => {
+		const script = path.join(dir, 'only-a-start-failure.mjs');
+		const module = pathToFileURL(path.join(REPO_ROOT, 'src', 'supervise.js')).href;
+		fs.writeFileSync(
+			script,
+			`import { startFailure } from ${JSON.stringify(module)};\n` +
+				`process.stdout.write(await startFailure({ once() {} }));\n`,
+			'utf-8'
+		);
+
+		// An unref'd timer empties this process's loop instead, and Node exits 13 on the unsettled await.
+		const run = spawnSync(process.execPath, [script], { encoding: 'utf-8', timeout: slow(20_000) });
+		assert.equal(run.status, 0, `it exited ${run.status}: ${run.stderr.trim()}`);
+		assert.match(run.stdout, /^it returned no pid, and reported no error within \d+ms$/);
+	}));
 
 test('a spawn return with no pid and no once() is answered, not thrown out of the call', () =>
 	withTempDir('guard-sup-', (dir) =>

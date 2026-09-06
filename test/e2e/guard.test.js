@@ -13,6 +13,7 @@ import {
 	countRunning,
 	fixture,
 	readyLine,
+	settle,
 	skipOnWindows,
 	slow,
 	waitFor,
@@ -184,6 +185,74 @@ test(
 					timeoutMs: slow(30_000),
 					intervalMs: 100,
 				});
+			})
+		)
+);
+
+test(
+	'two hosts that joined a third keep its process running when that third host is killed under them',
+	{ timeout: slow(120_000) },
+	() =>
+		withTempDir('guard-e2e-', (dir) =>
+			withSpawn(async ({ spawn }) => {
+				const tag = `e2e-survivor-${process.pid}`;
+				const argv = [process.execPath, fixture('idle.js'), tag];
+				const startHost = () =>
+					spawn(process.execPath, [fixture('host.js'), dir, tag], { stdio: ['ignore', 'pipe', 'ignore'] });
+
+				const owner = startHost();
+				const started = JSON.parse(await readyLine(owner));
+				const survivors = [startHost(), startHost()];
+				const joined = [];
+				for (const host of survivors) joined.push(JSON.parse(await readyLine(host)));
+
+				assert.deepEqual(
+					joined.map((result) => result.guarded),
+					[started.guarded, started.guarded],
+					'a host that should have joined started its own copy'
+				);
+				assert.equal(countRunning(argv), 1);
+
+				try {
+					// Only the host holding the lock goes. Its reaper removes that lock and then stops the very
+					// process the other two joined, so their supervision is what has to notice and replace it.
+					owner.kill('SIGKILL');
+					await waitFor(
+						() => !isAlive(started.guarded),
+						"the killed host's reaper to stop the process the survivors joined",
+						{ timeoutMs: slow(30_000), intervalMs: 100 }
+					);
+					await waitFor(() => countRunning(argv) >= 1, 'a surviving host to replace what it was left supervising', {
+						timeoutMs: slow(60_000),
+						intervalMs: 200,
+					});
+
+					// Both survivors answer the same death, from separate processes: the lock is the only thing
+					// between two hosts and two copies of a process this node may run exactly one of.
+					await settle(3000);
+					assert.equal(countRunning(argv), 1, 'two hosts answered one death with two processes');
+					const replacement = readLock(lockPath(dir, 'guarded'))?.pid;
+					assert.notEqual(replacement, started.guarded, 'the lock still names the process that was stopped');
+					assert.equal(isAlive(replacement ?? -1), true, 'the lock names a replacement that is not running');
+					for (const host of survivors) assert.equal(isAlive(host.pid ?? -1), true, 'a survivor died on its own');
+				} finally {
+					// The replacement is a plain child of whichever survivor started it, so killing the survivors
+					// leaves it to their reapers; waiting on that is also what proves nothing was left behind.
+					const left = readLock(lockPath(dir, 'guarded'))?.pid ?? 0;
+					for (const host of survivors) host.kill('SIGKILL');
+					try {
+						await waitFor(() => countRunning(argv) === 0, "the survivors' reapers to stop the replacement", {
+							timeoutMs: slow(30_000),
+							intervalMs: 100,
+						});
+					} finally {
+						try {
+							if (left > 0) process.kill(left, 'SIGKILL');
+						} catch {
+							// Already gone, which is the outcome asked for.
+						}
+					}
+				}
 			})
 		)
 );

@@ -350,6 +350,33 @@ test(
 		})
 );
 
+test(
+	'a gate whose holder is dead is cleared on the spot, so a claim does not spend its whole budget on it',
+	{ timeout: slow(10_000) },
+	() =>
+		withTempDir('guard-lock-', async (dir) => {
+			// The dead-holder twin of the case above. A thread killed inside its gate leaves this behind, and a
+			// claimant that could only wait it out would pay the whole budget on a start nothing is contending.
+			const gone = await deadPid();
+			const gate = `${lockPath(dir, 'stale-gate')}.claiming`;
+			fs.writeFileSync(gate, String(gone), 'utf-8');
+
+			const started = Date.now();
+			const claim = await claimLock({
+				pidDir: dir,
+				name: 'stale-gate',
+				version: 1,
+				argv: ['/bin/thing'],
+				timeoutMs: slow(5000),
+			});
+			const waited = Date.now() - started;
+
+			assert.equal(claim.outcome, 'won');
+			assert.ok(waited < slow(1000), `a gate held by dead pid ${gone} cost ${waited}ms of a ${slow(5000)}ms budget`);
+			assert.equal(fs.existsSync(gate), false, 'the gate was left behind');
+		})
+);
+
 test('a claim whose publish cannot land leaves no temp file behind', () =>
 	withTempDir('guard-lock-', async (dir) => {
 		// A directory where the lock file must go: the write lands and the rename cannot, which is the one

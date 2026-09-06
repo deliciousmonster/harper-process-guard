@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { pathToFileURL } from 'node:url';
 
 import { fingerprint, guard } from '../../src/index.js';
 import { isAlive } from '../../src/identity.js';
@@ -13,7 +14,11 @@ import {
 	captureLog,
 	countRunning,
 	fixture,
+	readyLine,
 	REPO_ROOT,
+	seedLock,
+	skipOnWindows,
+	slow,
 	waitFor,
 	WINDOWS,
 	withSpawn,
@@ -38,6 +43,34 @@ function stopReaper(reaper) {
 	} catch {
 		// Already gone, which is the outcome asked for.
 	}
+}
+
+/**
+ * A host process on disk. What the three tests below measure - whether guard() releases the event loop,
+ * and what the reaper it spawned was told across the process boundary - cannot be seen from inside the
+ * process that called guard(). Written per test rather than kept as a fixture, because each wants a
+ * different reaper config and one of them wants a host that returns.
+ *
+ * @param {string} dir Written here, which is also the pidDir every caller passes; a `.js` is not a `.pid`.
+ * @param {object} options guard() options, minus the spawn the script supplies itself.
+ * @param {{ park?: boolean }} [shape] park keeps the host up until something kills it, the way a host stays up.
+ * @returns {string} Path of the script.
+ */
+function writeHost(dir, options, { park = false } = {}) {
+	const file = path.join(dir, 'host-variant.js');
+	const module = pathToFileURL(path.join(REPO_ROOT, 'src', 'index.js')).href;
+	fs.writeFileSync(
+		file,
+		[
+			`import { spawn } from 'node:child_process';`,
+			`import { guard } from ${JSON.stringify(module)};`,
+			`const result = await guard({ ...${JSON.stringify(options)}, spawn });`,
+			`process.stdout.write(JSON.stringify({ guarded: result.processes[0]?.pid, reaper: result.reaper }) + '\\n');`,
+			...(park ? ['setInterval(() => {}, 1 << 30);'] : []),
+		].join('\n'),
+		'utf-8'
+	);
+	return file;
 }
 
 test('a fingerprint is a number a host can parseInt, and it moves when its inputs do', () => {
@@ -307,6 +340,153 @@ test('a host that permits only a bare `node` gets one reaper, not one per caller
 			}
 		})
 	));
+
+test(
+	'a host that returns from guard() exits, because the reaper it left running does not hold its event loop',
+	{ timeout: slow(60_000) },
+	() =>
+		withTempDir('guard-call-', (dir) =>
+			withSpawn(async ({ spawn }) => {
+				// The whole detached-reaper design rests on this: a reaper that outlives its host cannot also hold
+				// it open. Nothing is declared, so the reaper's own child handle is the only one that could.
+				const script = writeHost(dir, { pidDir: dir, processes: [], reaper: { name: 'reaper', graceMs: 50 } });
+				const host = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const started = JSON.parse(await readyLine(host));
+				/** @type {{ code: number | null; signal: string | null } | null} */
+				let ended = null;
+				host.once('exit', (code, signal) => {
+					ended = { code, signal };
+				});
+
+				try {
+					// Without a running reaper there is no handle to release, and this would pass on nothing.
+					assert.equal(started.reaper.started, true, `the reaper did not start: ${started.reaper.error}`);
+					assert.equal(isAlive(started.reaper.pid), true, 'the reaper was already gone before the host returned');
+					await waitFor(() => ended !== null, 'the host to exit once guard() returned', {
+						timeoutMs: slow(15_000),
+						intervalMs: 20,
+					});
+					assert.deepEqual(ended, { code: 0, signal: null });
+				} finally {
+					stopReaper(started.reaper);
+				}
+			})
+		)
+);
+
+test(
+	'the reaper is told where a replacement host records its pid, which only its command line can carry',
+	{ timeout: slow(60_000) },
+	(t) => {
+		if (
+			skipOnWindows(
+				t,
+				'a Windows child dies with the host that spawned it, which test/e2e/guard.test.js measured at 65ms, ' +
+					'so the process a replacement is meant to adopt is gone before the reaper looks; that the ' +
+					'handover keeps it running goes uncovered there.'
+			)
+		)
+			return;
+		return withTempDir('guard-call-', (dir) =>
+			withSpawn(async ({ spawn }) => {
+				// A live consumer feature: dd-mod1 sets replacementPidFile so a Harper restart inside the grace
+				// window keeps its agents. The flag crosses a process boundary, so nothing in-process covers it.
+				const tag = `replacement-${process.pid}`;
+				const logFile = path.join(dir, 'reaper.log');
+				const replacementPidFile = path.join(dir, 'replacement.pid');
+				const script = writeHost(
+					dir,
+					{
+						pidDir: dir,
+						processes: [{ name: 'guarded', binaryPath: process.execPath, args: [fixture('idle.js'), tag] }],
+						reaper: { name: 'reaper', graceMs: 5000, logFile, replacementPidFile },
+					},
+					{ park: true }
+				);
+				const host = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const started = JSON.parse(await readyLine(host));
+
+				try {
+					assert.equal(started.reaper.started, true, `the reaper did not start: ${started.reaper.error}`);
+					await waitFor(
+						() => fs.existsSync(logFile) && fs.readFileSync(logFile, 'utf-8').includes('watching pid'),
+						'the reaper to finish starting up'
+					);
+
+					// What a restart does: the replacement records its own pid, then the old host goes.
+					seedLock(replacementPidFile, { pid: process.pid, argv: [] });
+					host.kill('SIGKILL');
+
+					await waitFor(
+						() => fs.readFileSync(logFile, 'utf-8').includes(`pid ${process.pid} took over inside the grace window`),
+						'the reaper to find the replacement it was pointed at',
+						{ timeoutMs: slow(15_000), intervalMs: 50 }
+					);
+					assert.equal(isAlive(started.guarded), true, 'the process the replacement was to adopt was reaped');
+					assert.equal(fs.existsSync(lockPath(dir, 'guarded')), true, 'the lock it would be adopted by was removed');
+					await waitFor(() => !fs.existsSync(lockPath(dir, 'reaper')), 'the reaper to leave its own lock behind');
+				} finally {
+					// Its host is dead and the reaper deliberately left it running, so nothing else stops it.
+					try {
+						process.kill(started.guarded, 'SIGKILL');
+					} catch {
+						// Already gone, which is the outcome asked for.
+					}
+					stopReaper(started.reaper);
+				}
+			})
+		);
+	}
+);
+
+test(
+	'the reaper waits the grace this host asked for, not the 8s its own parser falls back to',
+	{ timeout: slow(60_000) },
+	() =>
+		withTempDir('guard-call-', (dir) =>
+			withSpawn(async ({ spawn }) => {
+				// reaper.js parseArgs falls back to 8000, so only a deadline under that can tell a grace which
+				// crossed the boundary from one that never did. slow() lifts it past 8000 on Windows, uncovered.
+				const tag = `grace-${process.pid}`;
+				const logFile = path.join(dir, 'reaper.log');
+				const script = writeHost(
+					dir,
+					{
+						pidDir: dir,
+						processes: [{ name: 'guarded', binaryPath: process.execPath, args: [fixture('idle.js'), tag] }],
+						reaper: { name: 'reaper', graceMs: 150, logFile },
+					},
+					{ park: true }
+				);
+				const host = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'ignore'] });
+				const started = JSON.parse(await readyLine(host));
+
+				try {
+					assert.equal(started.reaper.started, true, `the reaper did not start: ${started.reaper.error}`);
+					await waitFor(
+						() => fs.existsSync(logFile) && fs.readFileSync(logFile, 'utf-8').includes('watching pid'),
+						'the reaper to finish starting up'
+					);
+
+					host.kill('SIGKILL');
+					// Its own lock, not the guarded process, which on Windows died with its host long before this:
+					// removing it is what the reaper does at the far end of the grace window on every platform.
+					await waitFor(() => !fs.existsSync(lockPath(dir, 'reaper')), 'the reaper to finish inside its grace', {
+						timeoutMs: slow(4000),
+						intervalMs: 50,
+					});
+					assert.equal(fs.existsSync(lockPath(dir, 'guarded')), false, 'the reaper finished without reaping');
+				} finally {
+					try {
+						process.kill(started.guarded, 'SIGKILL');
+					} catch {
+						// Already gone, which is the outcome asked for.
+					}
+					stopReaper(started.reaper);
+				}
+			})
+		)
+);
 
 test('a version that has moved makes the running process an orphan rather than something to adopt', () =>
 	withTempDir('guard-call-', (dir) =>

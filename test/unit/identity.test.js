@@ -149,7 +149,10 @@ test('an answer the probe did not write is no answer at all', () => {
 });
 
 test('a BOM in front of redirected PowerShell output does not hide the answer', () => {
+	// U+FEFF is whitespace, so trim() carries this; a trimEnd() that only stripped the CRLF would leave
+	// the marker unmatchable and read every answer as one the probe never wrote.
 	assert.deepEqual(parseCimAnswer('\uFEFFgone\r\n'), { alive: false, argv: null });
+	assert.deepEqual(parseCimAnswer('\uFEFFlive C:\\dd\\agent.exe\r\n'), { alive: true, argv: ['C:\\dd\\agent.exe'] });
 });
 
 test('a Windows command line identifies the process the guard recorded, quoting and all', () =>

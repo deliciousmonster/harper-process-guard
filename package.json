@@ -43,8 +43,7 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"lint": "oxlint",
-		"test": "node --test \"test/**/*.test.js\"",
-		"ci:local": "node scripts/ci-local.js"
+		"test": "node --test \"test/**/*.test.js\""
 	},
 	"devDependencies": {
 		"@types/node": "^26.0.0",

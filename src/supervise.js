@@ -219,7 +219,9 @@ async function attempt(ctx, descriptor, state, restarts) {
 		ctx.log.info(
 			`process guard: the ${state.title} already runs on this node (pid ${claim.pid}); this thread joined it.`
 		);
-		void answerDeath(ctx, descriptor, state, restarts, watchPid(ctx, claim.pid), null);
+		// Read now, while the lock is still there: the death below is answered from a lock that may be gone.
+		const holder = readLock(lockPath(ctx.pidDir, descriptor.name));
+		void answerDeath(ctx, descriptor, state, restarts, watchPid(ctx, claim.pid), null, holder?.host ?? 0);
 		return;
 	}
 
@@ -270,7 +272,7 @@ async function attempt(ctx, descriptor, state, restarts) {
 		ctx.log.error(`process guard: ${state.error}`);
 	}
 	ctx.log.info(`process guard: started the ${state.title} (pid ${child.pid}): ${descriptor.argv.join(' ')}.`);
-	void answerDeath(ctx, descriptor, state, restarts, death, claim.token);
+	void answerDeath(ctx, descriptor, state, restarts, death, claim.token, process.pid);
 }
 
 /**
@@ -279,8 +281,9 @@ async function attempt(ctx, descriptor, state, restarts) {
  *
  * @param {Context} ctx @param {Descriptor} descriptor @param {ProcessState} state @param {number} restarts
  * @param {Promise<string>} death @param {string | null} token The owner's lock token; null when this thread only joined.
+ * @param {number} lockHost Pid of the host holding the lock: this process when it owns it, and whatever the lock named when this thread joined it.
  */
-async function answerDeath(ctx, descriptor, state, restarts, death, token) {
+async function answerDeath(ctx, descriptor, state, restarts, death, token, lockHost) {
 	const cause = await death;
 	if (ctx.run.stopping) return;
 	state.exited = true;
@@ -308,10 +311,13 @@ async function answerDeath(ctx, descriptor, state, restarts, death, token) {
 		ctx.log.info(`process guard: the ${state.title} (pid ${state.pid}) was shut down (${cause}); not restarting it.`);
 		return;
 	}
-	if (token === null && !existsSync(path)) {
+	// The lock goes two ways: its holder releases it on a deliberate stop, and a reaper removes it when the
+	// holder's host dies. Only that host tells them apart, and a dead one has left this death unanswered.
+	if (token === null && !existsSync(path) && isAlive(lockHost)) {
 		ctx.log.info(
-			`process guard: the ${state.title} (pid ${state.pid}) is gone (${cause}) and its lock with it, so ` +
-				`whichever thread held it has answered this death; this thread is not starting a replacement.`
+			`process guard: the ${state.title} (pid ${state.pid}) is gone (${cause}) and its lock with it. Host ` +
+				`${lockHost} held that lock and is still running, so it has answered this death; this thread is not ` +
+				`starting a replacement.`
 		);
 		return;
 	}
