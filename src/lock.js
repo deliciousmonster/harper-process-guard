@@ -200,10 +200,13 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 	}
 
 	const running = identify(held.pid, held.argv);
+	// 'unknown' is "not established", never "not ours": taking the lock on it starts a second process for a
+	// pid that is most likely the first. Only the claim's own deadline ends the wait for a real verdict.
+	if (running === 'unknown' && !expired) return { act: 'wait' };
 	if (running !== 'match') {
 		notes.add(
 			`${name}: the lock named live pid ${held.pid}, which ` +
-				`${running === 'differs' ? 'is running something else' : 'could not be identified here'}. ` +
+				`${running === 'differs' ? 'is running something else' : 'could not be identified inside the claim budget'}. ` +
 				`Taking the lock and signalling nothing.`
 		);
 		return { act: 'take' };

@@ -5,7 +5,6 @@ import { appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parentPort, threadId, workerData } from 'node:worker_threads';
 
-import { argvOf } from '../../src/identity.js';
 import { claimLock, commitLock, lockPath } from '../../src/lock.js';
 import { slow } from './harness.js';
 
@@ -15,9 +14,9 @@ const WINNERS = 1;
 const FINISHED = 2;
 const STOP = 3;
 
-// This process's own command line, so a winner can commit a live pid every loser then identifies and
-// joins. Every thread shares the process, so every thread agrees on it without coordinating.
-const argv = argvOf(process.pid) ?? [process.execPath];
+// The interpreter alone, which is a leading run of this live process's real command line on every
+// platform: what argvOf() reads back is one joined string, and win32 re-quotes that into a mismatch.
+const argv = [process.execPath];
 
 async function main() {
 	const ctl = new Int32Array(control);

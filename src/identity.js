@@ -12,10 +12,12 @@ import { setTimeout as delay } from 'node:timers/promises';
  */
 
 const PS_TIMEOUT_MS = 2000;
-const CIM_TIMEOUT_MS = 1500;
-/** The longest one inspect() can take. lock.js holds its gate across an identify, so a waiter that gives up
- * sooner breaks a gate a live thread is still inside, and both then decide one lock at once. */
-export const IDENTIFY_BUDGET_MS = Math.max(PS_TIMEOUT_MS, CIM_TIMEOUT_MS);
+// Every thread of a host probes the same lock at once and PowerShell does not start eight times in
+// parallel: 400ms alone, 2.9-3.6s apiece for eight at once, measured on a 2-vCPU windows-latest runner.
+const CIM_TIMEOUT_MS = 10_000;
+/** The longest one inspect() can take ON THIS HOST. lock.js holds its gate across an identify, so a waiter
+ * that gives up sooner breaks a gate a live thread is still inside, and both then decide one lock at once. */
+export const IDENTIFY_BUDGET_MS = process.platform === 'win32' ? CIM_TIMEOUT_MS : PS_TIMEOUT_MS;
 /** The two answers the win32 probe may print, so the script that writes them and the reader below are one protocol. */
 const LIVE = 'live';
 const GONE = 'gone';
@@ -132,7 +134,7 @@ function inspect(pid, withCommandLine = true) {
 			// WaitForSingleObject, so a terminated pid an open handle still names read ESRCH above.
 			if (!withCommandLine) return { alive: true, argv: null };
 			// PowerShell CIM, because `wmic` is absent from recent Windows and `tasklist` has no command
-			// line. Estimated 250-600ms a call against 3.5ms measured for `ps`, which is why nothing polls it.
+			// line. 400ms a call measured against 3.5ms for `ps`, which is why nothing polls it.
 			const script =
 				`[Console]::OutputEncoding=[Text.Encoding]::UTF8;` +
 				`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop;` +
@@ -167,7 +169,12 @@ export async function waitWhileAlive(pid, deadline, pollMs) {
 	while (Date.now() < deadline && isAlive(pid)) await delay(pollMs);
 }
 
-/** @param {number} pid @returns {string[] | null} */
+/**
+ * On darwin and win32 this is the whole command line in ONE element, because that is all either OS reports.
+ * Never an expectation for identify(): win32 re-quotes what it is handed, and a joined line does not survive it.
+ *
+ * @param {number} pid @returns {string[] | null}
+ */
 export function argvOf(pid) {
 	return inspect(pid).argv;
 }

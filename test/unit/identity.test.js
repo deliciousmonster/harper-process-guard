@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import test from 'node:test';
 
 import { argvOf, compareArgv, identify, isAlive, parseCimAnswer, windowsCommandLine } from '../../src/identity.js';
-import { deadPid, fixture, pidOf, readyLine, skipOnWindows, waitFor, withSpawn } from '../support/harness.js';
+import { deadPid, fixture, pidOf, readyLine, skipOnWindows, waitFor, WINDOWS, withSpawn } from '../support/harness.js';
 
 // Harper's vm-current-context sandbox substitutes node:child_process with only these five names;
 // execFileSync isn't one, and a real Harper node refuses to load a component that imports it.
@@ -166,6 +166,15 @@ test('a Windows command line identifies the process the guard recorded, quoting 
 		assert.equal(compareArgv(reported, ['C:\\dd\\agent.exe', 'run']), 'differs');
 	}));
 
+test('what the probe read back is not an expectation, because win32 re-quotes whatever it is handed', () =>
+	onPlatform('win32', () => {
+		// Windows reports one string, so argvOf() hands back one element holding the whole command line.
+		// Fed back as an expectation that element is quoted as a single argument, which no process matches.
+		const read = parseCimAnswer('live "C:\\Program Files\\dd\\agent.exe" run')?.argv ?? [];
+		assert.equal(compareArgv(read, read), 'differs', 'a caller must keep the vector it spawned, not what it read');
+		assert.equal(compareArgv(read, ['C:\\Program Files\\dd\\agent.exe', 'run']), 'match');
+	}));
+
 test('on win32 a matching prefix still has to end on an argument boundary', () =>
 	onPlatform('win32', () => {
 		assert.equal(compareArgv(['agent.exe --config x'], ['agent.exe', '--conf']), 'differs');
@@ -221,3 +230,56 @@ test('a liveness poll on win32 does not pay for a command line nobody asked for'
 		assert.ok(elapsed < 150, `200 liveness checks took ${elapsed.toFixed(0)}ms, so they went through the probe`);
 	});
 });
+
+/** One thread's identification, in a worker because the win32 probe blocks the thread it runs on. */
+const IDENTIFY_IN_WORKER = `
+	const { parentPort, workerData } = require('node:worker_threads');
+	import(workerData.identity).then(({ identify }) => parentPort.postMessage(identify(workerData.pid, workerData.argv)));
+`;
+
+/** @param {number} count @param {number} pid @param {readonly string[]} argv @returns {Promise<string[]>} */
+async function identifyAtOnce(count, pid, argv) {
+	const { Worker } = await import('node:worker_threads');
+	const identity = new URL('../../src/identity.js', import.meta.url).href;
+	return Promise.all(
+		Array.from(
+			{ length: count },
+			() =>
+				new Promise((resolve, reject) => {
+					const worker = new Worker(IDENTIFY_IN_WORKER, {
+						eval: true,
+						workerData: { identity, pid, argv: [...argv] },
+					});
+					worker.once('message', resolve);
+					worker.once('error', reject);
+				})
+		)
+	);
+}
+
+test(
+	'eight threads identifying one process at once all still identify it, so a slow probe starts nothing',
+	{ timeout: 120_000 },
+	async (t) => {
+		// Every thread of a host reaches the same lock and probes the same pid together. Only win32 pays a
+		// process start per identification, so only there can the eight of them outrun the probe's budget.
+		if (!WINDOWS) {
+			t.skip('linux reads /proc and darwin forks one `ps`; neither can time out under eight callers');
+			return;
+		}
+		await withSpawn(async ({ spawn }) => {
+			const argv = [process.execPath, fixture('idle.js'), `concurrent-identity-${process.pid}`];
+			const child = spawn(process.execPath, argv.slice(1), { stdio: 'ignore' });
+			await waitFor(() => argvOf(pidOf(child)) !== null, 'the child to appear');
+
+			const verdicts = await identifyAtOnce(8, pidOf(child), argv);
+			// A timed-out probe reads as 'unknown', and a claimant that never gets a verdict cannot join the
+			// process already running- which is how one declared process becomes several.
+			assert.deepEqual(
+				verdicts,
+				Array.from({ length: 8 }, () => 'match'),
+				`eight at once read ${verdicts}`
+			);
+		});
+	}
+);

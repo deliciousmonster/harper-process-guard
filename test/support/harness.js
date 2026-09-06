@@ -37,6 +37,18 @@ export function skipOnWindows(t, reason) {
 }
 
 /**
+ * Skip where no permission bit can stop a write, naming what goes uncovered. A uid 0 process holds
+ * CAP_DAC_OVERRIDE, so chmod cannot make a directory refuse it - which is every root container.
+ *
+ * @param {import('node:test').TestContext} t @param {string} reason @returns {boolean}
+ */
+export function skipAsRoot(t, reason) {
+	if (process.getuid?.() !== 0) return false;
+	t.skip(reason);
+	return true;
+}
+
+/**
  * mkdtemp pre-resolved: the macOS tmpdir sits behind /var -> /private/var and the Windows one can come
  * back as an 8.3 short path, and these suites compare paths against a process table that holds neither.
  *

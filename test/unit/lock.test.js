@@ -163,6 +163,50 @@ test('a lock naming a live process running something else is taken, and that pro
 		})
 	));
 
+test('a live pid no verdict could be reached on is waited on, because unknown is not "runs something else"', () =>
+	withTempDir('guard-lock-', async (dir) =>
+		withSpawn(async ({ spawn }) => {
+			const argv = [process.execPath, fixture('idle.js'), 'unverdicted'];
+			const child = spawn(process.execPath, argv.slice(1), { stdio: 'ignore' });
+			await waitFor(() => argvOf(pidOf(child)) !== null, 'the child to appear in the process table');
+			// A lock naming a live pid whose command line this reader cannot establish, which is what a probe
+			// that ran out of time leaves behind. Taking on that starts a second process for the pid already there.
+			seedLock(lockPath(dir, 'unverdicted'), { pid: pidOf(child), version: 1, argv: [] });
+
+			let settled = false;
+			const claim = claimLock({ pidDir: dir, name: 'unverdicted', version: 1, argv, timeoutMs: slow(5000) }).then(
+				(result) => {
+					settled = true;
+					return result;
+				}
+			);
+			await settle(100);
+			assert.equal(settled, false, "a pid that could not be identified was ruled somebody else's");
+
+			// The verdict lands, and the waiter joins the process rather than starting a second one.
+			seedLock(lockPath(dir, 'unverdicted'), { pid: pidOf(child), version: 1, argv });
+			assert.deepEqual(await claim, {
+				outcome: 'adopted',
+				pid: pidOf(child),
+				notes: [`unverdicted: joined the running pid ${pidOf(child)} rather than starting a second one.`],
+			});
+		})
+	));
+
+test('a verdict that never arrives outlives the budget and the lock is taken, so an unreadable pid cannot wedge a start', () =>
+	withTempDir('guard-lock-', async (dir) =>
+		withSpawn(async ({ spawn }) => {
+			const argv = [process.execPath, fixture('idle.js'), 'never-verdicted'];
+			const child = spawn(process.execPath, argv.slice(1), { stdio: 'ignore' });
+			await waitFor(() => argvOf(pidOf(child)) !== null, 'the child to appear in the process table');
+			seedLock(lockPath(dir, 'unreadable'), { pid: pidOf(child), version: 1, argv: [] });
+
+			const claim = await claimLock({ pidDir: dir, name: 'unreadable', version: 1, argv, timeoutMs: slow(50) });
+			assert.equal(claim.outcome, 'won');
+			assert.match(claim.notes.join('\n'), /could not be identified inside the claim budget/);
+		})
+	));
+
 test('a live process under a different version is an orphan, reported and left alone while stopOrphans is off', () =>
 	withTempDir('guard-lock-', async (dir) =>
 		withSpawn(async ({ spawn }) => {

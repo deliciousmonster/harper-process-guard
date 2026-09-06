@@ -85,11 +85,16 @@ test('a killed host does not leave its process behind', { timeout: slow(60_000) 
 			// SIGKILL, because that is the case nothing in-process can answer: no worker shutdown hook runs
 			// and no signal handler fires, so only something outside the host can stop what it started.
 			host.kill('SIGKILL');
-			await waitFor(() => !isAlive(started.guarded), 'the reaper to stop the process its host left behind', {
+			// The lock first: only the reaper touches it. On Windows the guarded process dies with its host
+			// inside 65ms, a poll before the reaper looks, so its death there covers nothing the reaper did.
+			await waitFor(() => !fs.existsSync(lockPath(dir, 'guarded')), 'the reaper to answer for the lock it watched', {
 				timeoutMs: slow(30_000),
 				intervalMs: 100,
 			});
-			assert.equal(fs.existsSync(lockPath(dir, 'guarded')), false, 'the reaper left the lock behind');
+			await waitFor(() => !isAlive(started.guarded), 'the process its host left behind to stop', {
+				timeoutMs: slow(30_000),
+				intervalMs: 100,
+			});
 			await waitFor(() => !fs.existsSync(lockPath(dir, 'reaper')), 'the reaper to remove its own lock');
 		})
 	)

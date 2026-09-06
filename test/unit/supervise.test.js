@@ -15,6 +15,7 @@ import {
 	pidOf,
 	seedLock,
 	settle,
+	skipAsRoot,
 	skipOnWindows,
 	slow,
 	tuning,
@@ -204,6 +205,11 @@ test('a lock-write failure while answering a deliberate exit is reported, never 
 			t,
 			'chmod cannot make a directory unwritable on Windows, so the failing lock release this needs cannot be ' +
 				'arranged; that a release failure is reported rather than thrown goes uncovered there.'
+		) ||
+		skipAsRoot(
+			t,
+			'root writes through any permission bit, so the failing lock release this needs cannot be arranged; ' +
+				'that a release failure is reported rather than thrown goes uncovered when the suite runs as root.'
 		)
 	)
 		return;

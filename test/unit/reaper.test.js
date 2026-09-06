@@ -86,7 +86,9 @@ test('an identified process is stopped, and its lock goes before the signal does
 			assert.equal(isAlive(pidOf(child)), true, 'the process went before its lock did');
 
 			await reaping;
-			assert.equal(isAlive(pidOf(child)), false, 'a process that ignored SIGTERM was never escalated to SIGKILL');
+			// The kernel does the killing, not the sender: kill(2) returns once the signal is queued. Measured
+			// at 37-75us on linux; darwin only reads instant because one liveness check there forks `ps` for 8ms.
+			await waitFor(() => !isAlive(pidOf(child)), 'the process that ignored SIGTERM to be escalated to SIGKILL and go');
 		})
 	);
 });
