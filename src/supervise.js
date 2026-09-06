@@ -107,13 +107,19 @@ export function startFailure(child) {
 	if (typeof child?.once !== 'function') return Promise.resolve('it returned no pid, and it reports no errors');
 	return Promise.race([
 		new Promise((resolve) => child.once('error', (error) => resolve(error.message))),
-		after(START_FAILURE_MS, `it returned no pid, and reported no error within ${START_FAILURE_MS}ms`),
+		// Held: an unanswerable spawn emits nothing, so this timer is the only thing that can settle the race.
+		after(START_FAILURE_MS, `it returned no pid, and reported no error within ${START_FAILURE_MS}ms`, true),
 	]);
 }
 
 /** @param {number} ms @param {string} value @returns {Promise<string>} */
-function after(ms, value) {
-	return new Promise((resolve) => setTimeout(() => resolve(value), ms).unref());
+function after(ms, value, hold = false) {
+	// Unref'd by default: a backstop beside a poll that already holds the loop must not keep a process
+	// alive on its own. A race where this timer is the only way out has to hold it, or nothing settles.
+	return new Promise((resolve) => {
+		const timer = setTimeout(() => resolve(value), ms);
+		if (!hold) timer.unref();
+	});
 }
 
 // A host may return a wrapper rather than a ChildProcess, whose 'exit' fires late or never- the poll backstops but
