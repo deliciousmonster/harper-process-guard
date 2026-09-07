@@ -67,8 +67,25 @@ jobs:
             }
           '
 
+      # npm 11 refuses to publish a prerelease without an explicit --tag rather than deriving one, so a
+      # release that never cuts a prerelease would never find out. `latest` is only ever the stable line.
+      - name: Derive the dist-tag from the version
+        id: dist
+        run: |
+          node -e '
+            const { version } = JSON.parse(require("node:fs").readFileSync("package.json", "utf8"));
+            const identifier = version.split("-")[1]?.split(".")[0];
+            if (identifier !== undefined && !/^[a-zA-Z][a-zA-Z0-9-]*$/.test(identifier)) {
+              console.log(`::error::Version ${version} has the prerelease identifier "${identifier}". A dist-tag cannot start with a digit, because npm would read it as a version. Name the prerelease (1.2.3-next.0, 1.2.3-rc.0), then re-tag.`);
+              process.exit(1);
+            }
+            const tag = identifier ?? "latest";
+            require("node:fs").appendFileSync(process.env.GITHUB_OUTPUT, `tag=${tag}\n`);
+            console.log(`Publishing ${version} under the ${tag} dist-tag.`);
+          '
+
       # There is no build: the tarball carries src/ as written, which is also what the matrix above ran.
       - name: Publish to npm
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag '${{ steps.dist.outputs.tag }}'
