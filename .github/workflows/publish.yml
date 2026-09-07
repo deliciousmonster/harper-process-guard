@@ -6,7 +6,7 @@ on:
     tags: ['v*']
 
 # The default for every job, including the reusable test call, which otherwise runs on the repo default
-# token grant; the publish job re-elevates id-token in its own block where provenance needs it.
+# token grant; the publish job re-elevates id-token in its own block, where the registry needs it.
 permissions:
   contents: read
 
@@ -28,7 +28,8 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
-      # `npm publish --provenance` mints an attestation from this OIDC token, recording which commit produced the tarball.
+      # npm authenticates to the registry with this OIDC token (a trusted publisher on npmjs.com names this
+      # repo and workflow file) and attaches provenance from it, so no npm token exists anywhere in this repo.
       id-token: write
     steps:
       - name: Checkout
@@ -85,7 +86,6 @@ jobs:
           '
 
       # There is no build: the tarball carries src/ as written, which is also what the matrix above ran.
+      # Provenance is automatic under trusted publishing, so there is no --provenance flag to forget.
       - name: Publish to npm
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --provenance --access public --tag '${{ steps.dist.outputs.tag }}'
+        run: npm publish --access public --tag '${{ steps.dist.outputs.tag }}'
