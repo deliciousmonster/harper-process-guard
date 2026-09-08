@@ -157,7 +157,7 @@ export function watchPid(ctx, pid) {
  * platform cannot describe is taken on trust, which on Windows is a CIM lookup that did not answer in
  * time. Signals nothing: whatever runs under that pid is the host's, or was never this thread's to stop.
  *
- * @param {{ pid?: number; spawnfile?: string }} child @param {{ argv: readonly string[]; binaryPath: string }} descriptor
+ * @param {{ pid?: number | undefined; spawnfile?: string | undefined }} child @param {{ argv: readonly string[]; binaryPath: string }} descriptor
  */
 export function describeHandedBackPid(child, descriptor) {
 	const pid = child.pid ?? 0;
