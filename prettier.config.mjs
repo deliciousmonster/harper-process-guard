@@ -1,4 +1,4 @@
-// Harper's shared prettier settings, restated inline; must match @harperfast/code-guidelines/prettier.
+// Prettier settings restated inline, so formatting needs nothing installed beyond prettier itself.
 export default {
 	printWidth: 120,
 	quoteProps: 'consistent',
