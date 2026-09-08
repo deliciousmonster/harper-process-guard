@@ -22,11 +22,11 @@ A green suite is not a review. A change to `lock.js`, `supervise.js` or `reaper.
 
 Five files under `src/`, ESM with `// @ts-check` and JSDoc, nothing built.
 
-- `identity.js` — one `inspect()` per pid answering liveness and command line together, one branch per platform. The Windows branch costs a PowerShell start, so `isAlive` never asks for the command line.
-- `lock.js` — the gate, `adjudicate()` (reads, changes nothing), and the writes: `claimLock`, `commitLock`, `releaseLock`. `safeLockWrite` turns a rejected or superseded write into a message.
-- `supervise.js` — start or join, watch, and answer a death by going back through the lock.
-- `reaper.js` — the detached script. SIGTERM or SIGINT to it unlinks its own lock first.
-- `index.js` — `guard()` and `fingerprint()`, the whole public surface. The reaper is launched before any `verify`: a probe can wait 30 seconds, and a host killed inside that window must not leave its processes behind.
+- `identity.js`: one `inspect()` per pid answering liveness and command line together, one branch per platform. The Windows branch costs a PowerShell start, so `isAlive` never asks for the command line.
+- `lock.js`: the gate, `adjudicate()` (reads, changes nothing), and the writes: `claimLock`, `commitLock`, `releaseLock`. `safeLockWrite` turns a rejected or superseded write into a message.
+- `supervise.js`: start or join, watch, and answer a death by going back through the lock.
+- `reaper.js`: the detached script. SIGTERM or SIGINT to it unlinks its own lock first.
+- `index.js`: `guard()` and `fingerprint()`, the whole public surface. The reaper is launched before any `verify`: a probe can wait 30 seconds, and a host killed inside that window must not leave its processes behind.
 
 Timings a test needs to wind down live on the context (`tuning`) or in `ReaperOptions`.
 
