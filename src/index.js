@@ -148,7 +148,7 @@ async function launchReaper(ctx, config) {
 			}
 			// The same refusal the agents get: a host that reuses processes by name can answer with a pid
 			// that is not a reaper, and a reaper that is not one stops nothing when the host goes.
-			const handedBack = describeHandedBackPid(child.pid, { argv: [command, ...args], binaryPath: REAPER_SCRIPT });
+			const handedBack = describeHandedBackPid(child, { argv: [command, ...args], binaryPath: REAPER_SCRIPT });
 			if (handedBack) {
 				refusals.push(`${command}: ${handedBack}`);
 				continue;

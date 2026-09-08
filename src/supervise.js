@@ -4,7 +4,7 @@
 import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { argvOf, errorMessage, identify, isAlive } from './identity.js';
+import { argvOf, compareArgv, errorMessage, isAlive } from './identity.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 
 /** Exits that mean somebody shut it down. Restarting into one of these fights the operator. */
@@ -150,23 +150,25 @@ export function watchPid(ctx, pid) {
 }
 
 /**
- * Why a pid a spawn returned cannot be taken as the process, or undefined when it can. Signals nothing:
- * whatever runs under that pid is the host's, or was never this thread's to stop.
+ * Why a pid a spawn returned cannot be taken as the process, or undefined when it can. A ChildProcess Node
+ * created for this call carries `spawnfile`, and that one is the process by construction. Anything else
+ * is a wrapper handing back a pid it found somewhere, and that pid is trusted on a positive identification
+ * and nothing less, the rule adoption follows. One already dead is left to the exit path, and one the
+ * platform cannot describe is taken on trust, which on Windows is a CIM lookup that did not answer in
+ * time. Signals nothing: whatever runs under that pid is the host's, or was never this thread's to stop.
  *
- * @param {number} pid @param {{ argv: readonly string[]; binaryPath: string }} descriptor
+ * @param {{ pid?: number; spawnfile?: string }} child @param {{ argv: readonly string[]; binaryPath: string }} descriptor
  */
-export function describeHandedBackPid(pid, descriptor) {
-	const verdict = identify(pid, descriptor.argv);
-	if (verdict === 'match') return undefined;
-	if (verdict === 'differs') {
-		const running = argvOf(pid);
-		return (
-			`handed back pid ${pid}, which is running ${running ? `\`${running.join(' ')}\`` : 'nothing'} rather than ` +
-			`${descriptor.binaryPath}. The host reused a process it never checked; a stale pid file at the host's ` +
-			`layer does this after a restart, and nothing here will supervise a stranger.`
-		);
-	}
-	return `handed back pid ${pid}, which could not be identified, so nothing here will trust it as the ${descriptor.binaryPath} it asked for.`;
+export function describeHandedBackPid(child, descriptor) {
+	const pid = child.pid ?? 0;
+	if (typeof child.spawnfile === 'string' || !isAlive(pid)) return undefined;
+	const running = argvOf(pid);
+	if (running === null || compareArgv(running, descriptor.argv) === 'match') return undefined;
+	return (
+		`handed back pid ${pid}, which is running \`${running.join(' ')}\` rather than ${descriptor.binaryPath}. ` +
+		`The host reused a process it never checked; a stale pid file at the host's layer does this after a ` +
+		`restart, and nothing here will supervise a stranger.`
+	);
 }
 
 /** Every attempt-failure path: record the message on state, log it, and surface it on the caller's first try.
@@ -279,7 +281,7 @@ async function attempt(ctx, descriptor, state, restarts) {
 	// pid file per name and returns whatever it names whenever kill(pid, 0) answers, and after a restart a
 	// recycled pid answers for a thread of the host itself. A pid this thread did not watch being created is
 	// trusted on a positive identification and nothing less, the same rule adoption follows.
-	const handedBack = describeHandedBackPid(child.pid, descriptor);
+	const handedBack = describeHandedBackPid(child, descriptor);
 	if (handedBack) {
 		const message = `the spawn of the ${state.title} ${handedBack}`;
 		failAttempt(ctx, state, message, `${message} (${descriptor.binaryPath})`);

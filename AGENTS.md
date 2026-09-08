@@ -13,6 +13,7 @@ Each of these was paid for once. `README.md` explains what they protect.
 - Identity is the command line, never the executable, which resolves to the interpreter for every node script.
 - Pid 1 is a process. Inside a container it is usually the host.
 - The reaper removes a lock before signalling what it names, and is spawned by path, never imported. Because it removes the lock, a joiner whose process died and whose lock is gone must still restart it when the owning host is dead; those two rules contradicted each other until `3b7ca4d`.
+- A pid the caller's `spawn` hands back is the process only when Node created it for that call (`spawnfile` is set); a wrapper's pid is identified first, and a stranger fails the attempt. Harper's own spawn returns a stale pid file's pid whenever `kill(pid, 0)` answers, and after a restart that is a thread of Harper itself. A pid the platform cannot describe is taken on trust, which on Windows is a CIM lookup that did not answer; that gap is known.
 - `spawn` comes from the caller. That is what makes the guard testable with a fake and usable by a host that constrains `child_process`.
 - A double stands in for an external boundary only. A test that mocks part of `src/` and asserts how the mock was called is not coverage; it has to assert what a real pid, lock or process did.
 
