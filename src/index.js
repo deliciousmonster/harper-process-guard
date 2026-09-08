@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { errorMessage } from './identity.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
-import { DEFAULT_TUNING, startFailure, superviseProcess } from './supervise.js';
+import { DEFAULT_TUNING, describeHandedBackPid, startFailure, superviseProcess } from './supervise.js';
 
 /** @typedef {import('./supervise.js').GuardLog} GuardLog */
 /** @typedef {import('./supervise.js').ProcessState} ProcessState */
@@ -56,6 +56,8 @@ const SILENT = { info: () => {}, warn: () => {}, error: () => {} };
 
 const DEFAULT_REAPER_NAME = 'process-guard-reaper';
 const REAPER_SCRIPT = fileURLToPath(new URL('./reaper.js', import.meta.url));
+
+export { argvOf, identify } from './identity.js';
 
 /** Fingerprint of whatever forces replacement of a running process, as a number inside 2^31 so a host that parseInt()s it agrees. @param {...unknown} parts */
 export function fingerprint(...parts) {
@@ -142,6 +144,13 @@ async function launchReaper(ctx, config) {
 			// pins the lock at pid 0 and skips the fallback command below, so the host leaves its processes.
 			if (!child.pid) {
 				refusals.push(`${command}: ${await startFailure(child)}`);
+				continue;
+			}
+			// The same refusal the agents get: a host that reuses processes by name can answer with a pid
+			// that is not a reaper, and a reaper that is not one stops nothing when the host goes.
+			const handedBack = describeHandedBackPid(child.pid, { argv: [command, ...args], binaryPath: REAPER_SCRIPT });
+			if (handedBack) {
+				refusals.push(`${command}: ${handedBack}`);
 				continue;
 			}
 			state.started = true;

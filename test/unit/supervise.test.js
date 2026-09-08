@@ -12,11 +12,12 @@ import { argvOf, isAlive } from '../../src/identity.js';
 import { lockPath, readLock } from '../../src/lock.js';
 import { superviseProcess, watchPid } from '../../src/supervise.js';
 import {
+	REPO_ROOT,
+	captureLog,
 	context,
 	deadPid,
 	fixture,
 	pidOf,
-	REPO_ROOT,
 	seedLock,
 	settle,
 	skipAsRoot,
@@ -48,6 +49,33 @@ async function alreadyRunning(dir, spawn, descriptor, host = process.pid) {
 	seedLock(lockPath(dir, descriptor.name), { pid: pidOf(child), version: 1, host, argv: descriptor.argv });
 	return child;
 }
+
+// Harper's own spawn keeps a pid file per name and, after a restart, hands back whatever pid it names if
+// kill(pid, 0) answers; a recycled pid answers for one of the host's own threads. Observed 2026-09-08 on a
+// stock harper container: three "started" agents that were three threads of pid 1.
+test('NEGATIVE: a spawn that hands back a pid running something else is refused, and its claim released', () =>
+	withTempDir('guard-sup-', async (dir) => {
+		/** @type {import('../../src/supervise.js').Spawn} */
+		const strangerSpawn = () => /** @type {any} */ ({ pid: process.pid, on() {}, once() {}, unref() {}, kill() {} });
+		const ctx = context(dir, strangerSpawn);
+		const log = ctx.log;
+		try {
+			const state = await superviseProcess(ctx, descriptorFor('one', 'idle.js'));
+			assert.equal(state.started, false);
+			assert.match(state.error ?? '', /handed back pid \d+, which is running `/);
+			assert.ok(
+				state.error?.includes(`rather than ${process.execPath}`),
+				`the refusal does not name what was asked for: ${state.error}`
+			);
+			assert.equal(fs.existsSync(lockPath(dir, 'one')), false, 'a refused start left its claim behind');
+			assert.ok(
+				log.all().some((line) => line.includes('handed back pid')),
+				'the refusal never reached the log'
+			);
+		} finally {
+			ctx.run.stopping = true;
+		}
+	}));
 
 test('the thread that wins starts the process and records its pid on the lock', () =>
 	withTempDir('guard-sup-', (dir) =>

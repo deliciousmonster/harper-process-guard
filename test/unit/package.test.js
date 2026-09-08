@@ -94,9 +94,10 @@ test('the source knows nothing about any particular consumer', () => {
 	}
 });
 
-test('the public surface is the two things a consumer calls', async () => {
+test('the public surface is the two calls a consumer makes and the two reads it needs to clear a host pid file', async () => {
 	const surface = Object.keys(await import('../../src/index.js')).sort();
 	// Everything else is an implementation detail, and a narrow surface is what keeps it small enough
-	// to hold in one head.
-	assert.deepEqual(surface, ['fingerprint', 'guard']);
+	// to hold in one head. identify and argvOf are out because a host that keeps its own pid file per
+	// process name hands a stale one back as the process, and only the consumer knows that file's path.
+	assert.deepEqual(surface, ['argvOf', 'fingerprint', 'guard', 'identify']);
 });

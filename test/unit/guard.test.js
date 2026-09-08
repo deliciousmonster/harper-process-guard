@@ -138,6 +138,35 @@ test("a caller's verify verdict lands on the state and in the log", () =>
 		})
 	));
 
+// The same host behaviour the agents meet: a spawn that hands back a pid it never started. A reaper that
+// is a thread of the host stops nothing when the host goes, so it is refused and said so.
+test('NEGATIVE: a reaper spawn that hands back a pid running something else is refused, and the guard says so', () =>
+	withTempDir('guard-reaper-', async (dir) =>
+		withSpawn(async ({ spawn }) => {
+			/** @type {import('../../src/supervise.js').Spawn} */
+			const strangerForReaper = (command, args, options) =>
+				String(args[0]).endsWith('reaper.js')
+					? /** @type {any} */ ({ pid: process.pid, on() {}, once() {}, unref() {}, kill() {} })
+					: spawn(command, args, options);
+			const log = captureLog();
+			const status = await guard({
+				pidDir: dir,
+				spawn: strangerForReaper,
+				log,
+				processes: [{ name: 'one', binaryPath: process.execPath, args: [fixture('idle.js')] }],
+				reaper: { name: 'reaper' },
+			});
+			try {
+				assert.equal(status.reaper?.started, false);
+				assert.match(status.reaper?.error ?? '', /handed back pid \d+, which is running/);
+				assert.equal(fs.existsSync(lockPath(dir, 'reaper')), false, 'a refused reaper left its lock behind');
+			} finally {
+				status.stop();
+				for (const state of status.processes) if (state.pid) process.kill(state.pid, 'SIGKILL');
+			}
+		})
+	));
+
 test('the reaper is launched before any verify, so a host killed inside a probe leaves nothing behind', () =>
 	withTempDir('guard-call-', (dir) =>
 		withSpawn(async ({ spawn }) => {

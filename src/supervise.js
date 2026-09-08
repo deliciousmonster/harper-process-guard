@@ -4,7 +4,7 @@
 import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { errorMessage, isAlive } from './identity.js';
+import { argvOf, errorMessage, identify, isAlive } from './identity.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 
 /** Exits that mean somebody shut it down. Restarting into one of these fights the operator. */
@@ -149,6 +149,26 @@ export function watchPid(ctx, pid) {
 	});
 }
 
+/**
+ * Why a pid a spawn returned cannot be taken as the process, or undefined when it can. Signals nothing:
+ * whatever runs under that pid is the host's, or was never this thread's to stop.
+ *
+ * @param {number} pid @param {{ argv: readonly string[]; binaryPath: string }} descriptor
+ */
+export function describeHandedBackPid(pid, descriptor) {
+	const verdict = identify(pid, descriptor.argv);
+	if (verdict === 'match') return undefined;
+	if (verdict === 'differs') {
+		const running = argvOf(pid);
+		return (
+			`handed back pid ${pid}, which is running ${running ? `\`${running.join(' ')}\`` : 'nothing'} rather than ` +
+			`${descriptor.binaryPath}. The host reused a process it never checked; a stale pid file at the host's ` +
+			`layer does this after a restart, and nothing here will supervise a stranger.`
+		);
+	}
+	return `handed back pid ${pid}, which could not be identified, so nothing here will trust it as the ${descriptor.binaryPath} it asked for.`;
+}
+
 /** Every attempt-failure path: record the message on state, log it, and surface it on the caller's first try.
  * @param {Context} ctx @param {ProcessState} state @param {string} message @param {string} [logMessage] Defaults to `message`; the start-failure paths append the binary path. */
 function failAttempt(ctx, state, message, logMessage = message) {
@@ -250,6 +270,18 @@ async function attempt(ctx, descriptor, state, restarts) {
 	// under fork pressure. It arrives as 'error' and never as an exit, so a start read here supervises nothing.
 	if (!child.pid) {
 		const message = `the ${state.title} failed to start: ${await startFailure(child)}`;
+		failAttempt(ctx, state, message, `${message} (${descriptor.binaryPath})`);
+		await releaseClaim(ctx, descriptor, claim.token);
+		return;
+	}
+
+	// A host that reuses processes by name can hand back a pid it never started: Harper's own spawn keeps a
+	// pid file per name and returns whatever it names whenever kill(pid, 0) answers, and after a restart a
+	// recycled pid answers for a thread of the host itself. A pid this thread did not watch being created is
+	// trusted on a positive identification and nothing less, the same rule adoption follows.
+	const handedBack = describeHandedBackPid(child.pid, descriptor);
+	if (handedBack) {
+		const message = `the spawn of the ${state.title} ${handedBack}`;
 		failAttempt(ctx, state, message, `${message} (${descriptor.binaryPath})`);
 		await releaseClaim(ctx, descriptor, claim.token);
 		return;
