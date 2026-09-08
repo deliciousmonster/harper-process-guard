@@ -13,7 +13,6 @@ import { lockPath, readLock } from '../../src/lock.js';
 import { superviseProcess, watchPid } from '../../src/supervise.js';
 import {
 	REPO_ROOT,
-	captureLog,
 	context,
 	deadPid,
 	fixture,
