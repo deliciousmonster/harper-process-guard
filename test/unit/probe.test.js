@@ -144,9 +144,15 @@ test('NEGATIVE: a stalled response is abandoned on the deadline', () =>
 		}
 	));
 
-test('a unix socket that accepts is an answer', () =>
+// Windows has no AF_UNIX socket at a filesystem path; the equivalent a process there listens on is a named
+// pipe, and node's net client dials both through the same call. So the address differs per platform and the
+// thing being asserted does not.
+const socketAddress = (/** @type {string} */ dir, /** @type {string} */ name) =>
+	process.platform === 'win32' ? `\\\\.\\pipe\\${name}-${process.pid}` : join(dir, `${name}.sock`);
+
+test('a socket that accepts is an answer', () =>
 	withTempDir('probe-sock-', async (dir) => {
-		const path = join(dir, 'probe.sock');
+		const path = socketAddress(dir, 'probe');
 		const server = createSocketServer((socket) => socket.end());
 		await new Promise((resolve) => server.listen(path, () => resolve(undefined)));
 		try {
@@ -158,7 +164,8 @@ test('a unix socket that accepts is an answer', () =>
 
 test('NEGATIVE: a missing socket, and a path that is a plain file, both read as false', () =>
 	withTempDir('probe-nosock-', async (dir) => {
-		assert.equal(await pollUnixSocket({ path: join(dir, 'absent.sock'), timeoutMs: 250, intervalMs: 50 }), false);
+		const absent = socketAddress(dir, 'absent');
+		assert.equal(await pollUnixSocket({ path: absent, timeoutMs: 250, intervalMs: 50 }), false);
 		const file = join(dir, 'plain');
 		writeFileSync(file, 'not a socket');
 		assert.equal(await pollUnixSocket({ path: file, timeoutMs: 250, intervalMs: 50 }), false);

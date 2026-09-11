@@ -153,6 +153,7 @@ test('an installed package that answers with the right file resolves it', () =>
 // with the core agent, and that path exists: trusting it starts two core agents and nothing binds the receiver.
 test('NEGATIVE: a package answering with a different binary is refused, not spawned', () =>
 	withTempDir('binary-stale-', async (root) => {
+		const exe = process.platform === 'win32' ? '.exe' : '';
 		const wrong = join(root, 'datadog-agent');
 		writeFileSync(wrong, 'the only binary this version ships');
 		const resolve = createBinaryResolver({
@@ -164,7 +165,9 @@ test('NEGATIVE: a package answering with a different binary is refused, not spaw
 		await assert.rejects(
 			() => resolve.resolveBinary({ shipsAs: 'trace-agent', title: 'trace-agent' }),
 			(/** @type {any} */ error) => {
-				assert.match(error.message, /predates trace-agent support/);
+				// The filename, suffix and all: on Windows the resolver asks for trace-agent.exe, and a message
+				// naming the bare stem would be one an operator cannot match against what is on disk.
+				assert.match(error.message, new RegExp(`predates trace-agent${exe} support`));
 				assert.ok(error.message.includes(wrong), 'the path it answered with is the evidence');
 				return true;
 			}

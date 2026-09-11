@@ -185,7 +185,11 @@ export async function pollEndpoint({ url, timeoutMs = 30_000, intervalMs = 250, 
  */
 export function tailFile(file, maxBytes = 64 * 1024) {
 	try {
-		const { size } = statSync(file);
+		const stats = statSync(file);
+		// A directory opens and reads back zero bytes on Windows, which would answer "" and say the log is
+		// empty. That is a different claim from "nothing here could be read", and a caller acts on it.
+		if (!stats.isFile()) return null;
+		const { size } = stats;
 		const start = Math.max(0, size - maxBytes);
 		const handle = openSync(file, 'r');
 		try {
