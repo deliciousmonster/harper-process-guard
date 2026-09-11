@@ -89,3 +89,34 @@ jobs:
       # Provenance is automatic under trusted publishing, so there is no --provenance flag to forget.
       - name: Publish to npm
         run: npm publish --access public --tag '${{ steps.dist.outputs.tag }}'
+
+      # `npm publish` sets exactly one tag, and npm only assigns `latest` on a package's FIRST publish. Every
+      # release since has gone out under `next`, so `latest` froze at whatever version created the name: on
+      # 2026-09-11 npm served 0.1.0-next.5 under `next` and 0.1.0-next.3 under `latest`, two releases behind.
+      # npmjs.com shows `latest`, and so does a bare `npm install`, so that stale number is the one a reader
+      # sees and an installer gets.
+      #
+      # This moves `latest` to the version just published, and only forward: a re-run of an older tag compares
+      # semver and leaves the newer `latest` alone rather than walking it backwards.
+      #
+      # Authentication is the open question. This job has no npm token and authenticates by OIDC, which npm
+      # documents for `npm publish`; whether the same exchange covers `dist-tag add` is not something this file
+      # can assert. The step therefore fails loudly and prints the exact command to run by hand, rather than
+      # passing quietly and leaving `latest` wrong for another release.
+      - name: Point latest at this release
+        run: |
+          set -o pipefail
+          name="$(node -p 'require("./package.json").name')"
+          version="$(node -p 'require("./package.json").version')"
+          current="$(npm view "$name" dist-tags.latest 2>/dev/null || true)"
+          if [ -n "$current" ] && [ "$current" = "$(printf '%s\n%s\n' "$current" "$version" | sort -rV | head -1)" ] && [ "$current" != "$version" ]; then
+            echo "Leaving $name at latest=$current, which is newer than $version"
+            exit 0
+          fi
+          if npm dist-tag add "$name@$version" latest; then
+            echo "latest -> $version for $name"
+          else
+            echo "::error::latest was not moved. The release itself published; only the tag is stale. Run this with a token that can write dist-tags:"
+            echo "  npm dist-tag add $name@$version latest"
+            exit 1
+          fi
