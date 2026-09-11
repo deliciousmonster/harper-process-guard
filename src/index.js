@@ -9,7 +9,7 @@ import { errorMessage } from './identity.js';
 import {
 	clearStaleHostPidFiles,
 	guardDescriptors,
-	identify,
+	tagState,
 	keepReaperAlive,
 	knownReaperFields,
 	supervisesNatively,
@@ -18,7 +18,7 @@ import {
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 import { DEFAULT_TUNING, describeHandedBackPid, startFailure, superviseProcess } from './supervise.js';
 
-/** @typedef {import('./supervise.js').GuardLog} GuardLog */
+/** @typedef {import('./log.js').Log} Log */
 /** @typedef {import('./supervise.js').ProcessState} ProcessState */
 /** @typedef {import('./supervise.js').Spawn} Spawn */
 
@@ -61,7 +61,7 @@ import { DEFAULT_TUNING, describeHandedBackPid, startFailure, superviseProcess }
  * @property {() => void} stop Halt supervision. Signals nothing and releases no lock, so nothing starts a duplicate.
  */
 
-/** @type {GuardLog} */
+/** @type {Log} */
 // A log that says nothing, for a caller that passed none. A caller with a partial logger wants
 // normaliseLog instead, which fills the missing levels rather than discarding every message.
 const SILENT = { info: () => {}, warn: () => {}, error: () => {} };
@@ -218,7 +218,7 @@ async function launchReaper(ctx, config) {
  * @param {Spawn} options.spawn
  * @param {number} [options.version] Fingerprint written to the lock; a process under a different one is an orphan, not something to adopt.
  * @param {boolean} [options.stopOrphans] Whether an identified orphan may be signalled. Off by default: a signal sent on a wrong identification cannot be taken back.
- * @param {GuardLog} [options.log]
+ * @param {Log} [options.log]
  * @param {ReaperConfig} [options.reaper] Omitted, no reaper is launched and the processes outlive the host.
  * @param {number} [options.claimTimeoutMs]
  * @returns {Promise<GuardResult>}
@@ -322,7 +322,7 @@ const hostSupervisor = (scope, log, label, kind) => {
 								log.error(
 									`${label}: the ${descriptor.title} started but did not verify: ${state.verifyDetail ?? 'no detail'}`
 								);
-							return identify(state, descriptor);
+							return tagState(state, descriptor);
 						})
 						.catch((/** @type {unknown} */ error) =>
 							unstarted(descriptor, describeSpawnFailure(error, descriptor.command))
@@ -431,7 +431,7 @@ const bundledSupervisor = (
 		}
 		return {
 			processes: result.processes.map((/** @type {any} */ state, /** @type {number} */ index) =>
-				identify(state, descriptors[index])
+				tagState(state, descriptors[index])
 			),
 			// Whole: guard() built this and its ReaperState typedef is the shape. Filtering it here dropped
 			// the reaper's own pid, which is the one field an operator needs to find the process.

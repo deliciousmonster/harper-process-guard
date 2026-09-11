@@ -437,7 +437,7 @@ test('a binary that is not there is reported and its lock is not left behind', (
 			const state = await superviseProcess(ctx, { ...descriptor, argv: [descriptor.binaryPath] });
 
 			assert.equal(state.started, false);
-			assert.match(state.error ?? '', /not-a-binary is missing/);
+			assert.match(state.error ?? '', /not-a-binary does not exist \(ENOENT\)/);
 			assert.equal(calls.length, 0);
 			assert.equal(fs.existsSync(lockPath(dir, 'absent')), false, 'a lock was left for a process that never started');
 		})
@@ -557,7 +557,7 @@ test('a start this node cannot make signals no orphan, because the lock is where
 			const state = await superviseProcess(ctx, { ...descriptor, binaryPath: missing, argv: [missing] });
 
 			assert.equal(state.started, false);
-			assert.match(state.error ?? '', /not-a-binary is missing/);
+			assert.match(state.error ?? '', /not-a-binary does not exist \(ENOENT\)/);
 			assert.equal(
 				readLock(lockPath(dir, 'deployed'))?.pid,
 				pidOf(running),

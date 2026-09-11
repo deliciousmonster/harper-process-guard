@@ -5,11 +5,10 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { argvOf, compareArgv, errorMessage, isAlive } from './identity.js';
-import { isDeliberate } from './exit.js';
-import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
-
 // Which exits mean somebody shut it down lives in exit.js, so this file and a consumer's status endpoint
 // cannot disagree about the same signal. Restarting into one of these fights the operator.
+import { describeSpawnFailure, isDeliberate } from './exit.js';
+import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 
 /** How long a spawn that came back without a pid gets to say why. Bounded because this blocks a start. */
 const START_FAILURE_MS = 1000;
@@ -32,13 +31,6 @@ export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs:
  * constrained spawn throws without one, and stock Node ignores it.
  *
  * @typedef {(command: string, args: string[], options: import('node:child_process').SpawnOptions & { name?: string }) => SpawnedChild} Spawn
- */
-
-/**
- * @typedef {object} GuardLog
- * @property {(message: string) => void} info
- * @property {(message: string) => void} warn
- * @property {(message: string) => void} error
  */
 
 /**
@@ -74,7 +66,7 @@ export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs:
  * @property {Spawn} spawn
  * @property {number} version
  * @property {boolean} stopOrphans
- * @property {GuardLog} log
+ * @property {import('./log.js').Log} log
  * @property {number} claimTimeoutMs
  * @property {string[]} report
  * @property {Tuning} tuning
@@ -87,8 +79,13 @@ const backoff = (ms) => delay(ms, undefined, { ref: false });
 /** Refuse a binary that is not there or not executable. spawn's own failure arrives asynchronously and names less. @param {string} binaryPath */
 function preflight(binaryPath) {
 	if (!binaryPath) throw new Error('its path could not be resolved');
-	if (!existsSync(binaryPath)) throw new Error(`${binaryPath} is missing`);
-	accessSync(binaryPath, constants.X_OK);
+	try {
+		accessSync(binaryPath, constants.X_OK);
+	} catch (error) {
+		// The same sentence a post-spawn ENOENT or EACCES gets. Two wordings for one condition is how an
+		// operator ends up with different advice depending on which check happened to run first.
+		throw new Error(describeSpawnFailure(error, binaryPath));
+	}
 }
 
 /** @param {SpawnedChild} child @returns {Promise<string>} */

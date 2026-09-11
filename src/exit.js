@@ -15,8 +15,8 @@ const SHUTDOWN_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGHUP']);
 const SPAWN_FAILURES = {
 	// X_OK passes for a binary built for another architecture, so this is the one cause no preflight sees.
 	ENOEXEC: (/** @type {string} */ path) =>
-		`${path} is not executable code for this machine (ENOEXEC). A platform ` +
-		`package filled from another architecture produces exactly this; check with \`file ${path}\`.`,
+		`${path} is not executable code for this machine (ENOEXEC). A binary built for another ` +
+		`architecture produces exactly this; check with \`file ${path}\`.`,
 	EACCES: (/** @type {string} */ path) =>
 		`${path} is not executable by this user (EACCES). Check the file mode, ` +
 		`then every directory on the path to it, then whether the volume is mounted noexec.`,
