@@ -293,13 +293,13 @@ export async function guard({
  * sweep, which is why they are named on both paths: naming them on one alone lets the other spawn before
  * the files exist.
  *
- * @param {any} scope @param {import('./log.js').Log} log @param {string} label
+ * @param {any} scope @param {import('./log.js').Log} log @param {string} label @param {string} kind
  */
-const hostSupervisor = (scope, log, label) => {
+const hostSupervisor = (scope, log, label, kind) => {
 	const unusedNote =
 		'the bundled process guard is present but unused: this host supervises the processes natively, so the guard never runs.';
 	return {
-		kind: 'host',
+		kind,
 		/** @param {readonly any[]} descriptors @param {any} context */
 		async start(descriptors, { configFiles, fingerprintParts }) {
 			log.warn(`${label}: ${unusedNote}`);
@@ -448,13 +448,18 @@ const bundledSupervisor = (
  * @param {any} scope
  * @param {object} options
  * @param {import('./log.js').Log} options.log @param {Spawn} options.spawn
- * @param {string} options.label How this component names itself in a log line.
- * @param {string} options.reaperName This component's own reaper lock name. Two components sharing a pid
+ * @param {string} [options.label] How this component names itself in a log line.
+ * @param {string} [options.reaperName] This component's own reaper lock name. Two components sharing a pid
  *   directory collide on the generic default, so a consumer states its own.
  * @param {(context: any) => void} [options.beforeStart]
+ * @param {string} [options.nativeKind] What `kind` the native path reports. A consumer's status endpoint
+ *   has published this string, so it is the consumer's to choose rather than this package's to rename.
  */
-export function supervisorFor(scope, { log, spawn, label, reaperName, beforeStart }) {
-	if (supervisesNatively(scope)) return hostSupervisor(scope, log, label);
+export function supervisorFor(
+	scope,
+	{ log, spawn, label = 'process guard', reaperName = DEFAULT_REAPER_NAME, beforeStart, nativeKind = 'host' }
+) {
+	if (supervisesNatively(scope)) return hostSupervisor(scope, log, label, nativeKind);
 	return bundledSupervisor(
 		/** @type {any} */ ({ log, spawn, label, reaperName, ...(beforeStart ? { beforeStart } : {}) })
 	);
