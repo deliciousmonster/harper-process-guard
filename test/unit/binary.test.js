@@ -237,6 +237,31 @@ test('NEGATIVE: a directory the package names but nothing is at is null', () =>
 		assert.equal(await resolve.resolveDir(PROBE, 'getEbpfDir'), null);
 	}));
 
+// A wrong answer outranks an absence: an operator who installs the add-on on that advice still has the same
+// broken base package afterwards, and has learnt nothing.
+test('a wrong answer is reported ahead of an uninstalled optional package', () => {
+	const asked = [
+		{ name: '@x/base-linux-x86_64', optional: false, installed: true, staleMatch: '/pkg/bin/datadog-agent' },
+		{ name: '@x/base-probe-linux-x86_64', optional: true, installed: false, carries: 'It carries the objects.' },
+	];
+	const message = resolutionFailure(asked, 'system-probe', '/repo/build/bin/system-probe', 'npm run build');
+	assert.match(message, /predates/);
+	assert.doesNotMatch(message, /npm install/, 'told the reader to install a package that would not fix this');
+});
+
+// Suggesting an install of something already installed is advice that cannot work, and the fallback has to name
+// every package that was asked or the reader goes checking the one that was fine.
+test('NEGATIVE: an installed add-on is never suggested for installation', () => {
+	const asked = [
+		{ name: '@x/base-linux-x86_64', optional: false, installed: true },
+		{ name: '@x/base-probe-linux-x86_64', optional: true, installed: true, carries: 'It carries the objects.' },
+	];
+	const message = resolutionFailure(asked, 'security-agent', '/repo/build/bin/security-agent', 'npm run build');
+	assert.doesNotMatch(message, /npm install/);
+	assert.match(message, /@x\/base-linux-x86_64, @x\/base-probe-linux-x86_64/);
+	assert.match(message, /\/repo\/build\/bin\/security-agent/);
+});
+
 // A second required package that is missing is a broken install, and "npm install" on it is the wrong fix: it
 // is already a dependency, so an install that skipped it will skip it again. Only a variant an operator adds by
 // name gets that sentence.

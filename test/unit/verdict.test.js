@@ -130,6 +130,17 @@ test('NEGATIVE: a proof that throws is a failed verdict naming the pid, not a th
 	assert.match(verdict.verifyDetail, /retaking the verdict against pid 200 threw: connection reset/);
 });
 
+// A proof that answers "no" is a verdict, not the absence of one: publishing null for it would read as
+// "nothing has checked" when something has, and said the process is not doing its job.
+test('a retake that fails is unverified, not unverdicted', async () => {
+	const verdict = await retakeVerdict(running({ pid: 200, verifiedPid: 100, restarts: 1 }), async () => ({
+		ok: false,
+		detail: 'nothing answered the receiver port',
+	}));
+	assert.equal(verdict.verified, false);
+	assert.equal(verdict.verifyDetail, 'nothing answered the receiver port');
+});
+
 test('with no proof to run, the verdict is reported as it stands', async () => {
 	const verdict = await retakeVerdict(running({ pid: 200, verifiedPid: 100, restarts: 1 }), undefined);
 	assert.equal(verdict.verified, null);

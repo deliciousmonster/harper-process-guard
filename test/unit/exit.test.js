@@ -39,6 +39,18 @@ test('a signalled process does not report a zero exit code', () => {
 	assert.notEqual(exit.exitCode, 0);
 });
 
+// The whole shape, not just the flag: a consumer's status endpoint prints `detail` and a host reads `exitCode`,
+// so both are contract rather than internal.
+test('a clean exit reports every field a consumer publishes', () => {
+	assert.deepEqual(describeExit(0, null), {
+		killed: false,
+		deliberate: true,
+		detail: 'exited cleanly',
+		exitCode: 0,
+	});
+	assert.equal(describeExit(2, null).exitCode, 2, 'a real exit code must survive to whoever reads it');
+});
+
 // supervise.js builds these strings for its log lines, and reads them back to decide on a restart. If the
 // two encodings drift, the guard restarts something an operator stopped.
 test('the cause strings supervise.js builds read back to the same verdict', () => {
