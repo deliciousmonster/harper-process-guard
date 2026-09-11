@@ -101,10 +101,14 @@ test('the public surface is what a consumer calls, and nothing else', async () =
 	// process name hands a stale one back as the process, and only the consumer knows that file's path.
 	// normaliseLog and the two lifecycle calls are in because every consumer was writing them for
 	// itself: guard() documents each log method as optional, and Harper importing a component without
-	// calling its plugin is a failure the component cannot see from inside.
+	// calling its plugin is a failure the component cannot see from inside. describeExit and
+	// describeSpawnFailure are in because supervise.js decides whether to restart from the same reading a
+	// consumer's status endpoint reports, and two copies of that judgement is two answers.
 	assert.deepEqual(surface, [
 		'argvOf',
 		'createHandleApplication',
+		'describeExit',
+		'describeSpawnFailure',
 		'fingerprint',
 		'guard',
 		'identify',

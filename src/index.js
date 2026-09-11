@@ -60,6 +60,7 @@ const DEFAULT_REAPER_NAME = 'process-guard-reaper';
 const REAPER_SCRIPT = fileURLToPath(new URL('./reaper.js', import.meta.url));
 
 export { argvOf, identify } from './identity.js';
+export { describeExit, describeSpawnFailure } from './exit.js';
 export { normaliseLog } from './log.js';
 export { createHandleApplication, watchForNeverCalled } from './lifecycle.js';
 

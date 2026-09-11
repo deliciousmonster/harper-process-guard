@@ -5,10 +5,11 @@ import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
 import { argvOf, compareArgv, errorMessage, isAlive } from './identity.js';
+import { isDeliberate } from './exit.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 
-/** Exits that mean somebody shut it down. Restarting into one of these fights the operator. */
-const DELIBERATE = new Set(['exit code 0', 'signal SIGTERM', 'signal SIGINT', 'signal SIGHUP']);
+// Which exits mean somebody shut it down lives in exit.js, so this file and a consumer's status endpoint
+// cannot disagree about the same signal. Restarting into one of these fights the operator.
 
 /** How long a spawn that came back without a pid gets to say why. Bounded because this blocks a start. */
 const START_FAILURE_MS = 1000;
@@ -324,7 +325,7 @@ async function answerDeath(ctx, descriptor, state, restarts, death, token, lockH
 	const path = lockPath(ctx.pidDir, descriptor.name);
 	const hint = cause.startsWith('exit code') && descriptor.exitHint ? ` ${descriptor.exitHint}` : '';
 
-	if (token !== null && DELIBERATE.has(cause)) {
+	if (token !== null && isDeliberate(cause)) {
 		// This guard sends SIGTERM itself when it stops an orphan, so a signal alone cannot tell an operator
 		// from a sibling thread. The lock can: another token holds it only because that thread took it first.
 		const holder = readLock(path);
