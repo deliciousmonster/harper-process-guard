@@ -52,12 +52,16 @@ import { DEFAULT_TUNING, describeHandedBackPid, startFailure, superviseProcess }
  */
 
 /** @type {GuardLog} */
+// A log that says nothing, for a caller that passed none. A caller with a partial logger wants
+// normaliseLog instead, which fills the missing levels rather than discarding every message.
 const SILENT = { info: () => {}, warn: () => {}, error: () => {} };
 
 const DEFAULT_REAPER_NAME = 'process-guard-reaper';
 const REAPER_SCRIPT = fileURLToPath(new URL('./reaper.js', import.meta.url));
 
 export { argvOf, identify } from './identity.js';
+export { normaliseLog } from './log.js';
+export { createHandleApplication, watchForNeverCalled } from './lifecycle.js';
 
 /** Fingerprint of whatever forces replacement of a running process, as a number inside 2^31 so a host that parseInt()s it agrees. @param {...unknown} parts */
 export function fingerprint(...parts) {
