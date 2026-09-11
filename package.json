@@ -46,8 +46,8 @@
 		"test": "node --test \"test/**/*.test.js\""
 	},
 	"devDependencies": {
-		"@types/node": "^26.0.0",
-		"oxlint": "1.81.0",
+		"@types/node": "^26.5.1",
+		"oxlint": "^1.82.0",
 		"prettier": "^3.9.6",
 		"typescript": "^7.0.2",
 		"yaml": "^2.9.0"
