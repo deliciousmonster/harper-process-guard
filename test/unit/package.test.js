@@ -105,14 +105,24 @@ test('the public surface is what a consumer calls, and nothing else', async () =
 	// describeSpawnFailure are in because supervise.js decides whether to restart from the same reading a
 	// consumer's status endpoint reports, and two copies of that judgement is two answers.
 	assert.deepEqual(surface, [
+		'REAPER_WATCH_MS',
 		'argvOf',
+		'clearStaleHostPidFiles',
 		'createHandleApplication',
+		'currentReaper',
 		'describeExit',
 		'describeSpawnFailure',
 		'fingerprint',
 		'guard',
+		'guardDescriptors',
+		'heldProcess',
 		'identify',
+		'keepReaperAlive',
+		'nodeProcess',
 		'normaliseLog',
+		'supervisesNatively',
+		'supervisorFor',
+		'unstarted',
 		'watchForNeverCalled',
 	]);
 });

@@ -4,7 +4,17 @@
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
+import { describeSpawnFailure } from './exit.js';
 import { errorMessage } from './identity.js';
+import {
+	clearStaleHostPidFiles,
+	guardDescriptors,
+	identify,
+	keepReaperAlive,
+	knownReaperFields,
+	supervisesNatively,
+	unstarted,
+} from './supervision.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 import { DEFAULT_TUNING, describeHandedBackPid, startFailure, superviseProcess } from './supervise.js';
 
@@ -61,6 +71,17 @@ const REAPER_SCRIPT = fileURLToPath(new URL('./reaper.js', import.meta.url));
 
 export { argvOf, identify } from './identity.js';
 export { describeExit, describeSpawnFailure } from './exit.js';
+export {
+	clearStaleHostPidFiles,
+	currentReaper,
+	guardDescriptors,
+	heldProcess,
+	keepReaperAlive,
+	nodeProcess,
+	REAPER_WATCH_MS,
+	supervisesNatively,
+	unstarted,
+} from './supervision.js';
 export { normaliseLog } from './log.js';
 export { createHandleApplication, watchForNeverCalled } from './lifecycle.js';
 
@@ -265,4 +286,176 @@ export async function guard({
 			run.stopping = true;
 		},
 	};
+}
+
+/**
+ * The host's own supervisor, one call per process. It writes any declared config files behind its own
+ * sweep, which is why they are named on both paths: naming them on one alone lets the other spawn before
+ * the files exist.
+ *
+ * @param {any} scope @param {import('./log.js').Log} log @param {string} label
+ */
+const hostSupervisor = (scope, log, label) => {
+	const unusedNote =
+		'the bundled process guard is present but unused: this host supervises the processes natively, so the guard never runs.';
+	return {
+		kind: 'host',
+		/** @param {readonly any[]} descriptors @param {any} context */
+		async start(descriptors, { configFiles, fingerprintParts }) {
+			log.warn(`${label}: ${unusedNote}`);
+			const processes = await Promise.all(
+				descriptors.map((descriptor) =>
+					scope.processes
+						.start({
+							name: descriptor.name,
+							title: descriptor.title,
+							command: descriptor.command,
+							args: descriptor.args,
+							configFiles,
+							fingerprint: fingerprintParts,
+							exitHint: descriptor.exitHint,
+							verify: descriptor.verify,
+						})
+						.then((/** @type {any} */ state) => {
+							// Only here: the guard reports its own verdicts through the log it was handed.
+							if (state.verified !== true)
+								log.error(
+									`${label}: the ${descriptor.title} started but did not verify: ${state.verifyDetail ?? 'no detail'}`
+								);
+							return identify(state, descriptor);
+						})
+						.catch((/** @type {unknown} */ error) =>
+							unstarted(descriptor, describeSpawnFailure(error, descriptor.command))
+						)
+				)
+			);
+			return { processes, reaper: knownReaperFields(scope.processes.reaper), report: [unusedNote] };
+		},
+	};
+};
+
+/**
+ * The bundled guard, one call for every process. `spawn` is the caller's own, which is the one the host
+ * constrains.
+ *
+ * @param {object} options
+ * @param {import('./log.js').Log} options.log @param {Spawn} options.spawn
+ * @param {string} options.label @param {string} options.reaperName
+ * @param {(context: any) => void} [options.beforeStart] Run before anything spawns; where a consumer
+ *   writes the config files its processes read, since on this path nothing else will.
+ */
+const bundledSupervisor = (
+	/** @type {{log: import('./log.js').Log, spawn: Spawn, label: string, reaperName: string, beforeStart?: (c: any) => void}} */ {
+		log,
+		spawn,
+		label,
+		reaperName,
+		beforeStart,
+	}
+) => ({
+	kind: 'guard',
+	/** @param {readonly any[]} descriptors @param {any} context */
+	async start(descriptors, context) {
+		const { root, pidDir, reaperLog, replacementPidFile, fingerprintParts } = context;
+		beforeStart?.(context);
+		clearStaleHostPidFiles(
+			root,
+			[
+				...descriptors.map((descriptor) => ({
+					name: descriptor.name,
+					argv: [descriptor.command, ...descriptor.args],
+				})),
+				// The guard builds the reaper's own argv; its script name is the one stable thing to match on.
+				{ name: reaperName, script: '/reaper.js' },
+			],
+			log,
+			label
+		);
+		const reaperConfig = {
+			name: reaperName,
+			logFile: reaperLog,
+			// A host records its own pid here, so a restart inside the grace window keeps the processes
+			// running for the replacement to adopt.
+			...(replacementPidFile ? { replacementPidFile } : {}),
+		};
+		let result;
+		try {
+			result = await guard({
+				pidDir,
+				spawn,
+				log,
+				version: fingerprint(...fingerprintParts),
+				// What makes the fingerprint a replacement rather than a second lock holder: without it a
+				// rotated credential leaves the old process running under no lock, so not even the reaper
+				// can stop it again.
+				stopOrphans: true,
+				processes: guardDescriptors(descriptors),
+				reaper: reaperConfig,
+			});
+		} catch (error) {
+			// Anything guard() does not catch itself reaches here, and no enumeration of those stays true.
+			// It starts the processes in order and rejects out of the one it was on, so one ahead of it is
+			// running under a committed lock with nothing watching it.
+			const message =
+				`${error instanceof Error ? error.message : String(error)}. No process is reported started ` +
+				`because the call threw before it reported any; one it had already spawned is still running ` +
+				`unsupervised, under a lock in ${pidDir}`;
+			log.error(`${label}: the guard call threw: ${error instanceof Error ? (error.stack ?? message) : message}`);
+			return {
+				// Not describeSpawnFailure: its translations are the host path's per-process contract, where
+				// the error IS that one process's own spawn rejection. Here the cause is unproven to be
+				// about any particular binary, so every process gets the same raw message.
+				processes: descriptors.map((descriptor) => unstarted(descriptor, message)),
+				report: [message],
+			};
+		}
+		if (result.reaper) {
+			// processes: [] is the reaper half on its own. Same lock, same arbitration, nothing else touched.
+			keepReaperAlive({
+				pidDir,
+				reaper: result.reaper,
+				log,
+				label,
+				reaperName,
+				relaunch: () =>
+					guard({
+						pidDir,
+						spawn,
+						log,
+						version: fingerprint(...fingerprintParts),
+						stopOrphans: false,
+						processes: [],
+						reaper: reaperConfig,
+					}),
+			});
+		}
+		return {
+			processes: result.processes.map((/** @type {any} */ state, /** @type {number} */ index) =>
+				identify(state, descriptors[index])
+			),
+			// Whole: guard() built this and its ReaperState typedef is the shape. Filtering it here dropped
+			// the reaper's own pid, which is the one field an operator needs to find the process.
+			reaper: result.reaper,
+			report: result.report,
+		};
+	},
+});
+
+/**
+ * The one place a supervisor is chosen. Everything downstream takes what this returns and never reads the
+ * host's scope again, so a second reading cannot disagree with the first.
+ *
+ * @param {any} scope
+ * @param {object} options
+ * @param {import('./log.js').Log} options.log @param {Spawn} options.spawn
+ * @param {string} options.label How this component names itself in a log line.
+ * @param {string} options.reaperName This component's own reaper lock name. Two components sharing a pid
+ *   directory collide on the generic default, so a consumer states its own.
+ * @param {(context: any) => void} [options.beforeStart]
+ */
+export function supervisorFor(scope, { log, spawn, label, reaperName, beforeStart }) {
+	if (supervisesNatively(scope)) return hostSupervisor(scope, log, label);
+	return bundledSupervisor(
+		/** @type {any} */ ({ log, spawn, label, reaperName, ...(beforeStart ? { beforeStart } : {}) })
+	);
 }

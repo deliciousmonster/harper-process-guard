@@ -42,12 +42,14 @@ test('a signalled process does not report a zero exit code', () => {
 // supervise.js builds these strings for its log lines, and reads them back to decide on a restart. If the
 // two encodings drift, the guard restarts something an operator stopped.
 test('the cause strings supervise.js builds read back to the same verdict', () => {
-	for (const [code, signal] of [
+	/** @type {Array<[number | null, string | null]>} */
+	const pairs = [
 		[0, null],
 		[1, null],
 		[null, 'SIGTERM'],
 		[null, 'SIGKILL'],
-	]) {
+	];
+	for (const [code, signal] of pairs) {
 		const cause = signal ? `signal ${signal}` : `exit code ${code}`;
 		assert.equal(isDeliberate(cause), describeExit(code, signal).deliberate, cause);
 	}
@@ -60,6 +62,7 @@ test('NEGATIVE: a cause string in neither shape is not deliberate', () => {
 
 // X_OK passes for a binary built for another architecture, so this is the one cause no preflight catches.
 test('each spawn refusal names what actually happened', () => {
+	/** @type {Array<[string, RegExp]>} */
 	const cases = [
 		['ENOEXEC', /not executable code for this machine/],
 		['EACCES', /not executable by this user/],
