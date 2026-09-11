@@ -35,7 +35,6 @@ all, each written inside a consumer first and moved here when a second one wante
 - `node.js`: the node rather than the thread, in two halves. `claimSingleton` picks one writer for periodic work and `sharedMarks` is a value every thread can read; `nodeProcess`, `currentReaper` and `keepReaperAlive` answer what the node has when a thread's own memory says otherwise.
 - `host.js`: the Harper boundary, which is four things a consumer wrote for itself first. `normaliseLog` fills a partial logger, `watchForNeverCalled` catches a host that imports a component and never calls its plugin, `hostRoot` and `resolvePort` read what Harper exposes to nobody, and `writeFiles` is temp-and-rename because every worker thread writes the same files.
 - `probe.js`: polling an endpoint or a unix socket until something answers, with a doubling backoff and a `giveUp` for a process that has died. `untraceWith` is how a consumer inside a traced application keeps its own probes out of the host's APM.
-- `binary.js`: asking each platform package for a binary by filename and checking the filename that comes back. A package published before a second binary existed answers every request with the first one, and that path exists.
 
 Two names were one letter apart and one file had no subject: `supervise.js` supervises a process, and
 `supervision.js` was fifteen exports across three ideas. It is gone. Its three parts went to the file that

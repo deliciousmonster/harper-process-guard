@@ -26,9 +26,8 @@ export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs:
 /** @typedef {import('node:child_process').ChildProcess} SpawnedChild */
 
 /**
- * The caller's spawn, injected rather than imported: that is what makes this testable with a fake and
- * usable by a host that hands out a constrained child_process. `name` is Harper's own extension: its
- * constrained spawn throws without one, and stock Node ignores it.
+ * The caller's spawn, injected so a host's constrained child_process can be handed in. `name` is Harper's
+ * extension: its spawn throws without one and stock Node ignores it.
  *
  * @typedef {(command: string, args: string[], options: import('node:child_process').SpawnOptions & { name?: string }) => SpawnedChild} Spawn
  */
@@ -96,8 +95,8 @@ function watchChild(child) {
 }
 
 /**
- * How spawn reports a failure it could only discover after returning. A real ChildProcess always emits
- * 'error'; a host's wrapper owes nobody one, and this waits on a startup path holding an uncommitted claim.
+ * How spawn reports a failure discoverable only after it returned. A real ChildProcess emits 'error'; a
+ * host's wrapper owes nobody one, and this waits on a startup holding an uncommitted claim.
  *
  * @param {SpawnedChild} child @returns {Promise<string>}
  */
@@ -112,16 +111,16 @@ export function startFailure(child) {
 
 /** @param {number} ms @param {string} value @returns {Promise<string>} */
 function after(ms, value, hold = false) {
-	// Unref'd by default: a backstop beside a poll that already holds the loop must not keep a process
-	// alive on its own. A race where this timer is the only way out has to hold it, or nothing settles.
+	// Unref'd by default: a backstop beside a poll that holds the loop must not keep a process alive. A race
+	// where this timer is the only way out holds it, or nothing settles.
 	return new Promise((resolve) => {
 		const timer = setTimeout(() => resolve(value), ms);
 		if (!hold) timer.unref();
 	});
 }
 
-// A host may return a wrapper rather than a ChildProcess, whose 'exit' fires late or never- the poll backstops but
-// yields to the event alone naming an exit code, so reading it first would misread a deliberate shutdown as a crash.
+// A host's wrapper may fire 'exit' late or never, so the poll backstops it but yields to the event, which
+// alone names an exit code; reading the poll first misreads a deliberate shutdown as a crash.
 /** @param {Context} ctx @param {SpawnedChild} child @param {number} pid A pid that names a running process; a start without one never reaches here. @returns {Promise<string>} */
 function watchProcess(ctx, child, pid) {
 	const event = typeof child?.on === 'function' ? watchChild(child) : null;
@@ -148,12 +147,8 @@ export function watchPid(ctx, pid) {
 }
 
 /**
- * Why a pid a spawn returned cannot be taken as the process, or undefined when it can. A ChildProcess Node
- * created for this call carries `spawnfile`, and that one is the process by construction. Anything else
- * is a wrapper handing back a pid it found somewhere, and that pid is trusted on a positive identification
- * and nothing less, the rule adoption follows. One already dead is left to the exit path, and one the
- * platform cannot describe is taken on trust, which on Windows is a CIM lookup that did not answer in
- * time. Signals nothing: whatever runs under that pid is the host's, or was never this thread's to stop.
+ * Why a pid a spawn returned cannot be taken as the process, or undefined when it can. Node's own child
+ * carries `spawnfile`; anything else handed back a pid it found, and that is trusted on identification alone.
  *
  * @param {{ pid?: number | undefined; spawnfile?: string | undefined }} child @param {{ argv: readonly string[]; binaryPath: string }} descriptor
  */
@@ -185,8 +180,8 @@ async function releaseClaim(ctx, descriptor, token) {
 }
 
 /**
- * One turn of the lifecycle: refuse a start that cannot happen, settle the lock, then start or join,
- * then watch. Resolves once the process is running or has been refused; the watch outlives this call.
+ * One turn: refuse a start that cannot happen, settle the lock, start or join, watch. Resolves once the
+ * process runs or was refused, and the watch outlives the call.
  *
  * @param {Context} ctx @param {Descriptor} descriptor @param {ProcessState} state @param {number} restarts
  */
@@ -199,8 +194,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 	state.code = undefined;
 	state.signal = undefined;
 
-	// Before the lock, because claiming it is where an orphan gets signalled: a node that cannot start a
-	// replacement must not stop what it has. The spawn refusal below cannot be hoisted the same way.
+	// Before the lock, where an orphan gets signalled: a node that cannot start a replacement must not stop
+	// what it has.
 	try {
 		preflight(descriptor.binaryPath);
 	} catch (error) {
@@ -275,10 +270,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 		return;
 	}
 
-	// A host that reuses processes by name can hand back a pid it never started: Harper's own spawn keeps a
-	// pid file per name and returns whatever it names whenever kill(pid, 0) answers, and after a restart a
-	// recycled pid answers for a thread of the host itself. A pid this thread did not watch being created is
-	// trusted on a positive identification and nothing less, the same rule adoption follows.
+	// A host reusing processes by name hands back a pid it never started, and after a restart a recycled one
+	// answers for a thread of the host itself. Trusted on a positive identification and nothing less.
 	const handedBack = describeHandedBackPid(child, descriptor);
 	if (handedBack) {
 		const message = `the spawn of the ${state.title} ${handedBack}`;
@@ -308,8 +301,8 @@ async function attempt(ctx, descriptor, state, restarts) {
 }
 
 /**
- * The one path for every death, whichever thread saw it. Going back through the lock is what answers
- * all four cases: this thread restarts a death nobody owns, and joins whatever another thread started.
+ * The one path for every death, whichever thread saw it: going back through the lock restarts a death
+ * nobody owns and joins whatever another thread started.
  *
  * @param {Context} ctx @param {Descriptor} descriptor @param {ProcessState} state @param {number} restarts
  * @param {Promise<string>} death @param {string | null} token The owner's lock token; null when this thread only joined.
@@ -374,8 +367,7 @@ async function answerDeath(ctx, descriptor, state, restarts, death, token, lockH
 }
 
 /**
- * Start `descriptor` if this thread wins its lock, join it if another thread already holds it, and
- * watch it either way.
+ * Start `descriptor` if this thread wins its lock, join it if another holds it, watch it either way.
  *
  * @param {Context} ctx @param {Descriptor} descriptor
  * @returns {Promise<ProcessState>}

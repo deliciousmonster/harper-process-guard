@@ -13,8 +13,8 @@ import { errnoCode, errorMessage } from './exit.js';
 const CLAIM_POLL_MS = 2;
 /** A free gate is usually a read, at most one signal and a rename away, so a waiter looks again at once. */
 const GATE_RETRY_MS = 1;
-// Above identity.js's IDENTIFY_BUDGET_MS, because adjudicate identifies INSIDE the gate: a writer that gave
-// up first would break a gate a live thread is still in, and both would then decide one lock at once.
+// Above IDENTIFY_BUDGET_MS: adjudicate identifies inside the gate, and a writer that gave up first would
+// break a gate a live thread is in.
 const GATE_WAIT_MS = IDENTIFY_BUDGET_MS + 1000;
 const GATE_SUFFIX = '.claiming';
 
@@ -55,8 +55,8 @@ function serialise(lock) {
 }
 
 /**
- * pid on line 1 and version on line 2, so a host reading only those two still reads this file. Line 3
- * is this guard's own record, and its absence marks a lock the guard did not write.
+ * pid on line 1, version on line 2, so a host reading only those two still reads this. Line 3 is the guard's
+ * own record, and its absence marks a lock the guard did not write.
  *
  * @param {string} path
  * @returns {Lock | null}
@@ -84,17 +84,14 @@ export function readLock(path) {
 			lock.argv = /** @type {string[]} */ (argv);
 		}
 	} catch {
-		// Absent, half-written, or written by something that is not this guard. Either way, no record.
+		// Absent, half-written, or not this guard's. Either way, no record.
 	}
 	return lock;
 }
 
 /**
- * Replace the lock where it stands, signalling the orphan it names first. rename(2) is atomic, so a
- * reader meets the old lock or the new one. The two steps live in one function because their ORDER is
- * the property: the write erases the only record of `stop`, so a host that dies between them must
- * leave the lock still naming the orphan. Nothing observes that window from outside the process, so
- * there is no test to hold the order - keeping them inseparable here is what does.
+ * Replace the lock, signalling the orphan it names first. One function because the ORDER is the property:
+ * the write erases the only record of `stop`, so a host dying between them leaves the lock naming the orphan.
  *
  * @param {string} path @param {Lock} lock @param {number} [stop] Pid to SIGTERM before the lock stops naming it.
  */
@@ -105,15 +102,15 @@ function publish(path, lock, stop) {
 	try {
 		renameSync(temp, path);
 	} catch (error) {
-		// A rename that failed leaves the temp where the pidDir keeps it forever, one per failed claim.
+		// A failed rename would leave the temp in the pidDir forever, one per failed claim.
 		unlinkQuietly(temp);
 		throw error;
 	}
 }
 
 /**
- * A lock on the lock: while it is held, one thread and no other decides what happens to `path`. That
- * exclusion is what turns a read followed by a write into one step.
+ * A lock on the lock: while held, one thread decides what happens to `path`. That exclusion turns a read
+ * followed by a write into one step.
  *
  * @param {string} path @param {boolean} expired Whether the caller's whole budget has run out.
  */
@@ -121,8 +118,8 @@ function takeGate(path, expired) {
 	const gate = `${path}${GATE_SUFFIX}`;
 	const temp = `${gate}.${process.pid}.${threadId}.${++serial}`;
 	try {
-		// Written before it is linked, so the gate names its holder the instant it exists. A gate that were
-		// empty for even a moment would read as abandoned to whoever looked inside that moment.
+		// Written before linking, so the gate names its holder the instant it exists: one empty moment would
+		// read as abandoned to whoever looked.
 		writeFileSync(temp, String(process.pid), 'utf-8');
 		linkSync(temp, gate);
 		return true;
@@ -137,18 +134,18 @@ function takeGate(path, expired) {
 	try {
 		holder = Number.parseInt(readFileSync(gate, 'utf-8'), 10);
 	} catch {
-		// A gate that could not be read is "cannot tell", never "not ours": clearing one on a failed read
-		// takes the gate a second thread has linked since, and both then decide this lock at once.
+		// Unreadable is "cannot tell", never "not ours": clearing on a failed read takes a gate a second
+		// thread has since linked.
 	}
-	// A gate whose holder is positively dead is not a gate. `expired` breaks one deliberately, and is the
-	// only path left that can leave two threads inside; without it a gate nobody will release hangs the caller.
+	// A gate whose holder is dead is not a gate. `expired` breaks one deliberately, the only remaining path
+	// that can leave two threads inside.
 	if (expired || (holder !== null && !isAlive(holder))) unlinkQuietly(gate);
 	return false;
 }
 
 /**
- * Hold the gate for `decide`, which must not await: the gate blocks every other thread's view of this
- * lock, so anything slow belongs outside it. null means the gate was not free.
+ * Hold the gate for `decide`, which must not await: the gate blocks every other thread's view of this lock.
+ * null means it was not free.
  *
  * @template T
  * @param {string} path @param {boolean} expired @param {() => T} decide @returns {T | null}
@@ -172,13 +169,13 @@ function signal(pid) {
 	try {
 		process.kill(pid, 'SIGTERM');
 	} catch {
-		// ESRCH: it went between the identification and the signal, which is the outcome asked for.
+		// ESRCH: gone between the identification and the signal, which is the outcome asked for.
 	}
 }
 
 /**
- * What to do about the lock as it stands. Reads the world and changes none of it: the caller signals and
- * publishes, so every write to this lock stays in one place.
+ * What to do about the lock as it stands. Reads the world and changes none of it, so every write to this
+ * lock stays in the caller.
  *
  * @param {Lock | null} held
  * @param {{ name: string, version: number, argv: readonly string[], stopOrphans: boolean, expired: boolean, notes: Set<string> }} against
@@ -188,8 +185,8 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 	if (!held) return { act: 'take' };
 
 	if (held.pid === 0) {
-		// A claim another thread has not finished. Wait for it to name its process rather than race it; a
-		// claimant whose process is gone, or one that never finished, has left a lock nobody will complete.
+		// A claim another thread has not finished. Wait rather than race it; a dead claimant left one nobody
+		// will complete.
 		if (isAlive(held.host) && !expired) return { act: 'wait' };
 		notes.add(`${name}: took over an unfinished claim from pid ${held.host}.`);
 		return { act: 'take' };
@@ -201,8 +198,8 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 	}
 
 	const running = identify(held.pid, held.argv);
-	// 'unknown' is "not established", never "not ours": taking the lock on it starts a second process for a
-	// pid that is most likely the first. Only the claim's own deadline ends the wait for a real verdict.
+	// 'unknown' is "not established", never "not ours": taking on it starts a second process for a pid that
+	// is most likely the first.
 	if (running === 'unknown' && !expired) return { act: 'wait' };
 	if (running !== 'match') {
 		notes.add(
@@ -228,8 +225,7 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 		notes.add(`${orphan} stopOrphans is off, so it was left running and may still hold what its replacement needs.`);
 		return { act: 'take' };
 	}
-	// One signal and no chase: a grace period would block the caller's startup, and by any deadline the pid
-	// may name something else. Nothing on this node names the orphan afterwards, which the note below says.
+	// One signal, no chase: a grace period blocks startup, and by any deadline the pid may name something else.
 	notes.add(
 		`${orphan} It was sent SIGTERM, which nothing here waits on: until it exits it may still hold what its ` +
 			`replacement needs, and nothing chases it if it ignores the signal.`
@@ -238,8 +234,8 @@ function adjudicate(held, { name, version, argv, stopOrphans, expired, notes }) 
 }
 
 /**
- * Take `<pidDir>/<name>.pid`, or join whatever already holds it. A caller that wins must call
- * commitLock once it has a pid; until then the lock reads pid 0 and other threads wait on it.
+ * Take `<pidDir>/<name>.pid`, or join what holds it. A winner must call commitLock once it has a pid; until
+ * then the lock reads pid 0 and other threads wait.
  *
  * @param {object} options
  * @param {string} options.pidDir
@@ -254,7 +250,7 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 	mkdirSync(pidDir, { recursive: true });
 	const path = lockPath(pidDir, name);
 	const token = `${process.pid}.${threadId}.${++serial}.${Date.now().toString(36)}`;
-	// A set, because a thread that loops around the gate re-adjudicates and would say the same thing twice.
+	// A set: a thread looping around the gate re-adjudicates and would say the same thing twice.
 	/** @type {Set<string>} */
 	const notes = new Set();
 	const deadline = Date.now() + timeoutMs;
@@ -264,8 +260,8 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 		const verdict = underGate(path, expired, () => {
 			const decision = adjudicate(readLock(path), { name, version, argv, stopOrphans, expired, notes });
 			if (decision.act !== 'take') return decision;
-			// Inside the gate, so no sibling thread can read a dying pid and adopt a corpse. publish sends
-			// the signal itself, which is what keeps it ahead of the write that erases the pid.
+			// Inside the gate, so no sibling reads a dying pid and adopts a corpse. publish signals itself,
+			// which keeps that ahead of the write erasing the pid.
 			publish(path, { pid: 0, version, token, host: process.pid, argv }, decision.stop);
 			return decision;
 		});
@@ -281,8 +277,8 @@ export async function claimLock({ pidDir, name, version, argv, timeoutMs = 30_00
 /** @typedef {'written' | 'gone' | 'taken'} WriteOutcome */
 
 /**
- * Record the pid this claim started, while the lock is still ours. A claimant that was taken over must
- * not stamp its pid onto the winner's file.
+ * Record the pid this claim started, while the lock is still ours: a claimant taken over must not stamp its
+ * pid onto the winner's file.
  *
  * @param {string} path @param {string} token @param {number} pid @param {number} version @param {readonly string[]} argv
  * @returns {Promise<WriteOutcome>}
@@ -297,8 +293,8 @@ export function commitLock(path, token, pid, version, argv) {
 }
 
 /**
- * Remove the lock only while it is still ours. This is the one place a lock is removed rather than
- * replaced: the process it named was shut down on purpose, and nothing should adopt it.
+ * Remove the lock while it is still ours. The one place a lock is removed rather than replaced: its process
+ * was shut down on purpose and nothing should adopt it.
  *
  * @param {string} path @param {string} token @returns {Promise<WriteOutcome>}
  */
@@ -312,10 +308,8 @@ export function releaseLock(path, token) {
 }
 
 /**
- * Await a commitLock or releaseLock write that must never throw past this point: every caller sits
- * behind a fire-and-forget death handler or a catch block already reporting a different failure. A
- * resolved `false` is as much a failure as a throw: it means the token this caller held no longer
- * matched what commitLock or releaseLock found on disk, so nothing was written.
+ * Await a lock write that must not throw: every caller sits behind a fire-and-forget death handler or a catch
+ * already reporting something else. A non-'written' outcome is as much a failure, and says which.
  *
  * @param {Promise<WriteOutcome>} write @returns {Promise<string | undefined>} The failure message, or undefined.
  */
@@ -323,8 +317,8 @@ export async function safeLockWrite(write) {
 	try {
 		const outcome = await write;
 		if (outcome === 'written') return undefined;
-		// Two different states, and only one of them is a handover: a lock that is absent was removed by
-		// the reaper or by a sibling's release, and naming that a handover invents a thread nobody has.
+		// Only one is a handover: an absent lock was removed by the reaper or a sibling's release, and calling
+		// that a handover invents a thread nobody has.
 		return outcome === 'gone'
 			? 'the lock was already gone when this write landed'
 			: 'the lock changed hands before this write landed';
@@ -335,8 +329,8 @@ export async function safeLockWrite(write) {
 
 /** @param {string} path @param {(held: Lock | null) => WriteOutcome} write @returns {Promise<WriteOutcome>} */
 async function writeUnderGate(path, write) {
-	// A gate is held across an identification at worst, so this waits that out rather than giving up. The
-	// budget matters only when the thread holding it died mid-decision, or wedged inside one.
+	// A gate is held across an identification at worst, so wait that out. The budget matters only for a
+	// thread that died mid-decision.
 	const deadline = Date.now() + GATE_WAIT_MS;
 	for (;;) {
 		const done = underGate(path, Date.now() >= deadline, () => write(readLock(path)));

@@ -18,23 +18,23 @@ const PS_TIMEOUT_MS = 2000;
 // Every thread of a host probes the same lock at once and PowerShell does not start eight times in
 // parallel: 400ms alone, 2.9-3.6s apiece for eight at once, measured on a 2-vCPU windows-latest runner.
 const CIM_TIMEOUT_MS = 10_000;
-/** The longest one inspect() can take ON THIS HOST. lock.js holds its gate across an identify, so a waiter
- * that gives up sooner breaks a gate a live thread is still inside, and both then decide one lock at once. */
+/** The longest inspect() can take on this host. lock.js holds its gate across an identify, so a waiter that
+ * gives up sooner breaks a gate a live thread is inside and both then decide one lock. */
 export const IDENTIFY_BUDGET_MS = process.platform === 'win32' ? CIM_TIMEOUT_MS : PS_TIMEOUT_MS;
 /** The two answers the win32 probe may print, so the script that writes them and the reader below are one protocol. */
 const LIVE = 'live';
 const GONE = 'gone';
 
 /**
- * The win32 probe's answer, or null when it printed neither. 'gone' is "no such process"; 'live' with
- * nothing after it is a process that exists and would not say what it is, which stays "cannot tell".
+ * The win32 probe's answer, or null when it printed neither. 'live' with nothing after it is a process that
+ * exists and would not say what it is, which stays "cannot tell".
  *
  * @param {string} stdout
  * @returns {{ alive: boolean, argv: string[] | null } | null}
  */
 export function parseCimAnswer(stdout) {
-	// trim() removes the BOM PowerShell prefixes redirected output with (U+FEFF is whitespace) as well as
-	// the trailing CRLF, so the marker is matched against the answer alone.
+	// trim() removes the BOM PowerShell prefixes redirected output with, and the trailing CRLF, so the
+	// marker is matched against the answer alone.
 	const text = stdout.trim();
 	if (text === GONE) return { alive: false, argv: null };
 	if (text !== LIVE && !text.startsWith(`${LIVE} `)) return null;
@@ -44,7 +44,7 @@ export function parseCimAnswer(stdout) {
 
 /**
  * One argument as libuv writes it into a Windows command line (src/win/process.c, quote_cmd_arg). Windows
- * keeps no argv, so the recorded vector has to be quoted the way it was to compare against what it kept.
+ * keeps no argv, so a recorded vector is quoted the way it was to compare against what Windows kept.
  *
  * @param {string} argument
  * @returns {string}
@@ -73,12 +73,8 @@ export function windowsCommandLine(argv) {
 }
 
 /**
- * One look at a pid: whether it still runs, and what its command line is. Where one read answers both it
- * does, because on darwin a separate liveness question would cost a second `ps` on every poll.
- *
- * A zombie holds its pid and answers kill(pid, 0), but runs nothing and never will again, so it counts
- * as gone. Only 0 and negatives are refused outright: kill(2) reads those as process GROUPS, whereas
- * pid 1 is a process, and inside a container it is the host this guard watches.
+ * Whether a pid still runs and what its command line is, answered by one read where one read answers both.
+ * A zombie counts as gone; 0 and negatives are refused, since kill(2) reads those as process groups.
  *
  * @param {number} pid
  * @param {boolean} [withCommandLine] False asks liveness alone. It changes nothing on linux or darwin,
@@ -95,7 +91,7 @@ function inspect(pid, withCommandLine = true) {
 	}
 	try {
 		if (process.platform === 'linux') {
-			// comm is parenthesised and may contain spaces and parens, so state is the token after the LAST ')'.
+			// comm is parenthesised and may hold spaces and parens, so state is the token after the LAST ')'.
 			const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
 			if (
 				stat
@@ -109,8 +105,8 @@ function inspect(pid, withCommandLine = true) {
 			return { alive: true, argv: raw === '' ? null : raw.replace(/\0$/, '').split('\0') };
 		}
 		if (process.platform === 'darwin') {
-			// execFileSync is absent from Harper's constrained child_process stub; execSync is the only sync
-			// option it keeps. Safe as a shell string here only because pid was checked an integer above.
+			// execSync is the only sync spawn Harper's constrained child_process keeps. Safe as a shell string
+			// only because pid was checked an integer above.
 			const [state, ...argv] = execSync(`ps -p ${pid} -o state=,args=`, {
 				encoding: 'utf-8',
 				timeout: PS_TIMEOUT_MS,
@@ -124,11 +120,10 @@ function inspect(pid, withCommandLine = true) {
 			return { alive: true, argv: argv.length > 0 ? argv : null };
 		}
 		if (process.platform === 'win32') {
-			// Liveness never reaches the probe: libuv's kill(pid, 0) reads GetExitCodeProcess and
-			// WaitForSingleObject, so a terminated pid an open handle still names read ESRCH above.
+			// Liveness never reaches the probe: libuv's kill(pid, 0) already answered it above.
 			if (!withCommandLine) return { alive: true, argv: null };
-			// PowerShell CIM, because `wmic` is absent from recent Windows and `tasklist` has no command
-			// line. 400ms a call measured against 3.5ms for `ps`, which is why nothing polls it.
+			// PowerShell CIM: `wmic` is gone from recent Windows and `tasklist` has no command line. 400ms a
+			// call against 3.5ms for `ps`, which is why nothing polls it.
 			const script =
 				`[Console]::OutputEncoding=[Text.Encoding]::UTF8;` +
 				`$p=Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}' -ErrorAction Stop;` +
@@ -141,11 +136,10 @@ function inspect(pid, withCommandLine = true) {
 			return parseCimAnswer(stdout) ?? { alive: true, argv: null };
 		}
 	} catch {
-		// The state could not be read. Liveness was already answered by kill(pid, 0), and a command line
-		// nothing can read is "cannot tell".
+		// Liveness was answered by kill(pid, 0); a command line nothing can read is "cannot tell".
 		return { alive: true, argv: null };
 	}
-	// Anything else. A caller that cannot see must do nothing and say why.
+	// Any other platform. A caller that cannot see must do nothing and say why.
 	return { alive: true, argv: null };
 }
 
@@ -155,17 +149,19 @@ export function isAlive(pid) {
 	return pid === process.pid || inspect(pid, false).alive;
 }
 
-/** Cadence for a wait measured in seconds: each pass costs a `ps` on darwin, so a tighter one buys nothing and forks hundreds of times. */
+/** Cadence for a wait measured in seconds. Each pass costs a `ps` on darwin, so tighter forks hundreds of
+ * times and buys nothing. */
 export const STOP_POLL_MS = 50;
 
-/** Poll until `pid` is gone or `deadline` passes, whichever comes first. Shared so a caller's grace period is one loop, not one per caller. @param {number} pid @param {number} deadline @param {number} pollMs */
+/** Poll until `pid` is gone or `deadline` passes. Shared, so a grace period is one loop and not one per
+ * caller. @param {number} pid @param {number} deadline @param {number} pollMs */
 export async function waitWhileAlive(pid, deadline, pollMs) {
 	while (Date.now() < deadline && isAlive(pid)) await delay(pollMs);
 }
 
 /**
- * On darwin and win32 this is the whole command line in ONE element, because that is all either OS reports.
- * Never an expectation for identify(): win32 re-quotes what it is handed, and a joined line does not survive it.
+ * On darwin and win32 the whole command line in ONE element, which is all either reports. Never an
+ * expectation for identify(): win32 re-quotes what it is handed and a joined line does not survive that.
  *
  * @param {number} pid @returns {string[] | null}
  */
@@ -174,8 +170,8 @@ export function argvOf(pid) {
 }
 
 /**
- * `expected` must be a LEADING RUN of the pid's own argv, so pinning more of the command line can only
- * ever narrow a verdict. An empty `expected` describes no process, so it identifies none.
+ * `expected` is a LEADING RUN of the pid's argv, so pinning more can only narrow a verdict. An empty one
+ * describes no process and identifies none.
  *
  * @param {readonly string[] | null} actual
  * @param {readonly string[]} expected
@@ -184,8 +180,8 @@ export function argvOf(pid) {
 export function compareArgv(actual, expected) {
 	if (expected.length === 0 || actual === null) return 'unknown';
 	if (process.platform === 'darwin' || process.platform === 'win32') {
-		// Joined, because both report one string and re-splitting reads a spaced argument as two. The
-		// trailing space is what keeps `--conf` from matching a prefix of `--config`.
+		// Joined: both report one string and re-splitting reads a spaced argument as two. The trailing space
+		// keeps `--conf` from matching a prefix of `--config`.
 		const head = actual.join(' ');
 		const want = process.platform === 'win32' ? windowsCommandLine(expected) : expected.join(' ');
 		return head === want || head.startsWith(`${want} `) ? 'match' : 'differs';

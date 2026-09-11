@@ -1,14 +1,6 @@
-// The Harper boundary: everything a component has to deal with because it is a plugin rather than a program.
-//
-// Four things, and a consumer wrote every one of them for itself before this file existed. Harper's Logger
-// declares every method optional. Harper calls the plugin once per worker thread, and for an auto-scanned
-// component directory it never calls it at all. Harper exposes neither its root path nor its port overrides,
-// so a component reads the same chain Harper reads for itself. And config files are written by every thread
-// at once, so they are replaced rather than rewritten.
-//
-// A component that guesses its root puts the PID locks under each worker's own cwd, and two workers that
-// disagree each start their own processes. That is the shape of every failure here: the host does not say,
-// the component assumes, and the assumption differs per thread.
+// @ts-check
+// The Harper boundary: an optional-everything logger, a plugin entry called once per thread or never, a root
+// path the host will not name, and config files every thread writes at once.
 
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -20,11 +12,8 @@ import { threadId } from 'node:worker_threads';
 /** @typedef {{ info(m: string): void, warn(m: string): void, error(m: string): void }} Log */
 
 /**
- * A log with all three methods, whatever the host implements.
- *
- * Each level falls back to the next most severe thing the host has, and to console.log if it has nothing,
- * so a message is never dropped for want of a method. Bound to the host, because Harper's logger reads
- * `this`.
+ * All three methods whatever the host implements, each falling back to the next most severe thing it has and
+ * to console.log. Bound, because Harper's logger reads `this`.
  *
  * @param {object} [host] Harper's compartment `logger`, or anything console-shaped.
  * @returns {Log}
@@ -48,15 +37,13 @@ export function normaliseLog(host = console) {
 
 // -- When it calls you, and when it does not ------------------------------------------------------------------
 
-// 60s because handleApplication runs behind scope.ready and waitForDeployCompletion, then behind a
-// per-plugin lock whose own wait is Harper's plugin timeout plus 5s: 35s at the 30s default. A shorter
-// window libels a slow node.
+// 60s: handleApplication runs behind scope.ready, waitForDeployCompletion, and a per-plugin lock waiting
+// Harper's plugin timeout plus 5s. A shorter window libels a slow node.
 const START_DEADLINE_MS = 60_000;
 
 /**
- * Watch for Harper never calling the plugin at all, which is what an auto-scanned component directory
- * gets: Harper imports the module for its resources, calls no plugin, and discards it. Module evaluation
- * is the only vantage point left, because nothing inside the plugin ever runs.
+ * Watch for Harper never calling the plugin, which is what a component found by scanning componentsRoot
+ * gets. Module evaluation is the only vantage point left, since nothing inside the plugin runs.
  *
  * @param {object} options
  * @param {Log} options.log
@@ -86,12 +73,8 @@ export function watchForNeverCalled({ log, label, configEntry, deadlineMs = STAR
 }
 
 /**
- * The plugin entry Harper calls once per worker thread.
- *
- * Two rules, and both are load-bearing. A deploy pre-flight loads the component against a live node just to
- * validate it, and starting there re-enters the sweep and spawn path on every `harper deploy`. And a second
- * call joins the first promise rather than starting again, which is the single-start guarantee the whole
- * PID lock exists to make good on.
+ * The plugin entry, once per worker thread. A validation load starts nothing, or every `harper deploy`
+ * re-enters the spawn path against a live node; a second call joins the first promise rather than starting.
  *
  * @param {object} options
  * @param {(scope?: any) => Promise<object>} options.start
@@ -101,8 +84,7 @@ export function watchForNeverCalled({ log, label, configEntry, deadlineMs = STAR
  */
 export function createHandleApplication({ start, deadline, slot }) {
 	return function handleApplication(/** @type {any} */ scope) {
-		// Being called at all is what the deadline waits for; a validation load counts, since Harper
-		// reached the plugin either way.
+		// Being called at all disarms the deadline; a validation load counts, Harper reached the plugin.
 		deadline.seen();
 		if (scope?.isTransientValidation) return;
 		if (!slot.get()) slot.set(start(scope));
@@ -149,10 +131,8 @@ export function hostRoot(log, label = 'process guard') {
 }
 
 /**
- * A port from the environment, or the fallback, never a number nobody wrote.
- *
- * parseInt reads "8126tcp" as 8126, so this matches the whole string instead. `0` is kept rather than
- * rejected because it is how every process here spells "serve no endpoint".
+ * A port from the environment or the fallback, never a number nobody wrote: parseInt reads "8126tcp" as
+ * 8126, so the whole string is matched. `0` is kept, being how these processes spell "serve no endpoint".
  *
  * @param {string} name @param {number} fallback @param {Log} log @param {string} [label]
  * @param {NodeJS.ProcessEnv} [env]
@@ -169,12 +149,8 @@ export function resolvePort(name, fallback, log, label = 'process guard', env = 
 }
 
 /**
- * Write every file, replacing whatever was there.
- *
- * Temp-and-rename, because every worker thread writes these on startup and a process rereading one must see
- * the old contents or the new, never half of each. Named per thread so two writing at once cannot share a
- * scratch file. A failure is logged and the rest are still written: one unwritable path is not a reason to
- * leave a process with no config at all.
+ * Write every file, replacing what was there. Temp-and-rename named per thread, because every worker writes
+ * these at once and a reader must see one version or the other; one failure does not stop the rest.
  *
  * @param {Record<string, string>} files @param {Log} log @param {string} [label]
  */

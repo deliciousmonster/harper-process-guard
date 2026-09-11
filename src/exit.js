@@ -1,11 +1,6 @@
-// One reading per way a process can fail to run or stop running, from the two that only read an error's own
-// fields up to the one that decides whether a restart would fight an operator.
-//
-// This is the single source of truth for "was that a shutdown or a crash". supervise.js decides whether to
-// restart from it, and a consumer's status endpoint describes a death from it, so the two can never
-// disagree about the same signal. Before this file they did: this package carried a set of deliberate
-// cause strings and its consumers each carried their own set of shutdown signals, maintained without
-// reference to it.
+// @ts-check
+// Was that a shutdown or a crash. supervise.js restarts from this and a consumer's status describes a death
+// from it, so the two cannot disagree about the same signal.
 
 import { constants } from 'node:os';
 
@@ -19,8 +14,8 @@ export function errorMessage(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 
-// Signals a supervisor sends on the way down. Anything else reaching a child is a crash or an OOM kill, and
-// a Go process that never installed a handler exits with no code at all either way.
+// Signals a supervisor sends on the way down. Anything else is a crash or an OOM kill, and a Go process with
+// no handler exits with no code at all either way.
 const SHUTDOWN_SIGNALS = new Set(['SIGTERM', 'SIGINT', 'SIGHUP']);
 
 const SPAWN_FAILURES = {
@@ -37,29 +32,22 @@ const SPAWN_FAILURES = {
 };
 
 /**
- * Why a spawn was refused, named. Falls back to the thrown message, which is what a host's own refusals
- * carry: Harper's constrained spawn rejects an unlisted command with its own wording and this must not
- * overwrite it.
+ * Why a spawn was refused. Falls back to the thrown message, which is what a host's own refusal carries:
+ * Harper rejects an unlisted command in its own words and this must not overwrite them.
  *
  * @param {unknown} error @param {string} binaryPath
  */
 export function describeSpawnFailure(error, binaryPath) {
-	const code =
-		error instanceof Error && typeof (/** @type {any} */ (error).code) === 'string'
-			? /** @type {any} */ (error).code
-			: undefined;
+	const code = errnoCode(error);
 	const known =
 		code === undefined ? undefined : /** @type {Record<string, (p: string) => string>} */ (SPAWN_FAILURES)[code];
 	if (known) return known(binaryPath);
-	return error instanceof Error ? error.message : String(error);
+	return errorMessage(error);
 }
 
 /**
- * How a child ended, in the terms that separate a shutdown from a kill.
- *
- * A signalled process reports code `null`, which reads as a clean stop everywhere `code || 0` is written.
- * `deliberate` is what says whether restarting would fight an operator, and it is the only answer to that
- * question in this package.
+ * How a child ended. A signalled process reports code `null`, which reads as a clean stop everywhere
+ * `code || 0` is written, and `deliberate` is the only answer here to whether a restart would fight anyone.
  *
  * @param {number | null} code @param {NodeJS.Signals | string | null} signal
  * @returns {{ killed: boolean, deliberate: boolean, detail: string, exitCode: number }}
@@ -82,9 +70,8 @@ export function describeExit(code, signal) {
 }
 
 /**
- * Whether an exit cause string names a deliberate stop. supervise.js builds `signal SIGTERM` and
- * `exit code 0` strings for its log lines, so this reads them back through describeExit rather than
- * keeping a second list of the same signals.
+ * Whether an exit cause string names a deliberate stop, read back through describeExit rather than against a
+ * second list of the same signals.
  *
  * @param {string} cause
  */

@@ -42,8 +42,8 @@ function log(options, message) {
 }
 
 /**
- * Every lock this guard wrote under `pidDir`, its own excluded. A lock with no guard record on line 3
- * belongs to the host or to something else, and nothing here may act on it.
+ * Every lock this guard wrote under `pidDir`, its own excluded: one with no guard record on line 3 belongs
+ * to the host, and nothing here may act on it.
  *
  * @param {ReaperOptions} options
  * @returns {{ path: string; pid: number; argv: readonly string[] }[]}
@@ -69,8 +69,8 @@ export function collectTargets(options) {
 }
 
 /**
- * The lock goes BEFORE the signal: a thread that reads a dying pid adopts a corpse and never retries,
- * where one that finds nothing starts a replacement.
+ * The lock goes BEFORE the signal: a thread reading a dying pid adopts a corpse and never retries, where
+ * one finding nothing starts a replacement.
  *
  * @param {ReaperOptions} options @param {{ path: string; pid: number; argv: readonly string[] }} target
  */
@@ -104,9 +104,8 @@ export async function reapTarget(options, target) {
 	}
 }
 
-/** The pid of a replacement host, or null. Never the process this was watching: the OS can hand that pid
- * to a stranger inside the grace window, and adopting it orphans the processes for good. Exported because
- * run() reaches this only once hostPid is dead, so nothing else can drive the recycled case.
+/** The pid of a replacement host, or null. Never the watched process: the OS can hand that pid to a
+ * stranger inside the grace window, and adopting it orphans everything for good.
  * @param {ReaperOptions} options */
 export function replacementPid(options) {
 	if (!options.replacementPidFile) return null;
@@ -173,9 +172,8 @@ export function parseArgs(argv) {
 }
 
 /**
- * Node's default action for an unhandled SIGTERM or SIGINT kills this process before any of its own
- * code runs, so without this handler a caller that signals the reaper directly - rather than waiting
- * for it to notice hostPid is gone - leaves this reaper's own lock behind forever.
+ * An unhandled SIGTERM kills this process before its own code runs, so without this a caller that signals
+ * the reaper directly leaves its lock behind forever.
  *
  * @param {ReaperOptions} options @param {NodeJS.Signals} signal
  */

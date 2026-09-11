@@ -63,7 +63,6 @@ const REAPER_SCRIPT = fileURLToPath(new URL('./reaper.js', import.meta.url));
 export { argvOf, identify } from './identity.js';
 export { describeExit, describeSpawnFailure } from './exit.js';
 export { currentVerdict, neverStarted, retakeVerdict, takeVerdictAgainst } from './verdict.js';
-export { createBinaryResolver, resolutionFailure } from './binary.js';
 export {
 	createHandleApplication,
 	hostRoot,
@@ -211,8 +210,7 @@ async function launchReaper(ctx, config) {
 }
 
 /**
- * Take one lock per declared process, start what this thread wins and join what it does not, then keep
- * watching. `spawn` is injected rather than imported, which is what lets a host substitute its own.
+ * One lock per declared process: start what this thread wins, join what it does not, keep watching.
  *
  * @param {object} options
  * @param {string} options.pidDir Where the locks live. One file per process, `<name>.pid`.
@@ -296,8 +294,7 @@ export async function guard({
 export const supervisesNatively = (/** @type {any} */ scope) => typeof scope?.processes?.start === 'function';
 
 /**
- * The state a supervisor never reached, in the shape both of them report. `started` is what answers "is it
- * running": `exited: false` here means it never ran, not that it still does.
+ * The state a supervisor never reached, in the shape both report. `exited: false` here means it never ran.
  *
  * @param {{ name: string, title?: string, kind?: string }} descriptor @param {string} [error]
  */
@@ -327,11 +324,8 @@ const tagState = (/** @type {any} */ state, /** @type {any} */ descriptor) =>
 	Object.assign(state, { name: descriptor.name, title: descriptor.title, kind: descriptor.kind });
 
 /**
- * The guard's process descriptors from a consumer's own.
- *
- * A process that declares `env` gets it spread over this process's own, because naming `env` at all
- * replaces the whole environment rather than adding to it, and credentials reach a child no other way. One
- * that declares none is left without `spawnOptions`, so it inherits exactly as it would have.
+ * The guard's descriptors from a consumer's own. A declared `env` is spread over this process's, because
+ * naming `env` replaces the environment rather than adding to it; one declaring none inherits untouched.
  *
  * @param {readonly Record<string, any>[]} descriptors @param {NodeJS.ProcessEnv} [inherited]
  */
@@ -348,9 +342,8 @@ export function guardDescriptors(descriptors, inherited = process.env) {
 }
 
 /**
- * The host's own supervisor, one call per process. It writes any declared config files behind its own
- * sweep, which is why they are named on both paths: naming them on one alone lets the other spawn before
- * the files exist.
+ * The host's own supervisor, one call per process. It writes the declared config files behind its own sweep,
+ * which is why both paths name them: naming them on one lets the other spawn before they exist.
  *
  * @param {any} scope @param {import('./host.js').Log} log @param {string} label @param {string} kind
  */
@@ -394,8 +387,7 @@ const hostSupervisor = (scope, log, label, kind) => {
 };
 
 /**
- * The bundled guard, one call for every process. `spawn` is the caller's own, which is the one the host
- * constrains.
+ * The bundled guard, one call for every process. `spawn` is the caller's, which is the constrained one.
  *
  * @param {object} options
  * @param {import('./host.js').Log} options.log @param {Spawn} options.spawn
@@ -444,26 +436,23 @@ const bundledSupervisor = (
 				spawn,
 				log,
 				version: fingerprint(...fingerprintParts),
-				// What makes the fingerprint a replacement rather than a second lock holder: without it a
-				// rotated credential leaves the old process running under no lock, so not even the reaper
-				// can stop it again.
+				// What makes a new fingerprint a replacement rather than a second holder: without it a rotated
+				// credential leaves the old process under no lock, past even the reaper.
 				stopOrphans: true,
 				processes: guardDescriptors(descriptors),
 				reaper: reaperConfig,
 			});
 		} catch (error) {
-			// Anything guard() does not catch itself reaches here, and no enumeration of those stays true.
-			// It starts the processes in order and rejects out of the one it was on, so one ahead of it is
-			// running under a committed lock with nothing watching it.
+			// guard() starts in order and rejects out of the one it was on, so a process ahead of it is running
+			// under a committed lock with nothing watching it.
 			const message =
 				`${error instanceof Error ? error.message : String(error)}. No process is reported started ` +
 				`because the call threw before it reported any; one it had already spawned is still running ` +
 				`unsupervised, under a lock in ${pidDir}`;
 			log.error(`${label}: the guard call threw: ${error instanceof Error ? (error.stack ?? message) : message}`);
 			return {
-				// Not describeSpawnFailure: its translations are the host path's per-process contract, where
-				// the error IS that one process's own spawn rejection. Here the cause is unproven to be
-				// about any particular binary, so every process gets the same raw message.
+				// Not describeSpawnFailure: its translations assume the error IS one process's spawn rejection.
+				// Here the cause is not proven to be about any binary, so all get the raw message.
 				processes: descriptors.map((descriptor) => unstarted(descriptor, message)),
 				report: [message],
 			};
@@ -501,8 +490,8 @@ const bundledSupervisor = (
 });
 
 /**
- * The one place a supervisor is chosen. Everything downstream takes what this returns and never reads the
- * host's scope again, so a second reading cannot disagree with the first.
+ * The one place a supervisor is chosen: everything downstream takes what this returns and never reads the
+ * host's scope again.
  *
  * @param {any} scope
  * @param {object} options

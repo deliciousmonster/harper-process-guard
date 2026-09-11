@@ -1,17 +1,6 @@
-// The node, where every consumer of this package is one thread of many.
-//
-// Harper runs a worker thread per core and loads every component into each of them, so anything a component
-// does on a timer it does N times, and anything it remembers in module memory it remembers N times over with
-// no two threads agreeing. The lock files already arbitrate the processes. These are the same answer for the
-// two other things a component needs the node to have rather than the thread: one writer for periodic work,
-// and a value every thread can read.
-//
-// What the supervised processes cost is here for the same reason. A thread measures pids the node runs, not
-// pids it started, so the reader has to work from a number rather than from its own memory of a spawn.
-//
-// And the second half of the file is that same question asked of the processes themselves: a thread's own
-// memory of a spawn is not the node's state, so what it reports is read back off the locks rather than
-// remembered. A thread whose spawn was refused still has to say whether the node is running the process.
+// @ts-check
+// The node, where every consumer is one thread of many: one writer for periodic work, one value every thread
+// reads, and process state read back off the locks rather than remembered per thread.
 
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -27,24 +16,15 @@ const KB = 1024;
 const safe = (/** @type {string} */ key) => key.replace(/[^\w.-]+/g, '_');
 
 /**
- * A value every thread on the node can read, one small file per key beside the guard's own locks.
- *
- * Harper answers a request on whichever worker thread is free, so a mark kept in module memory is private to
- * one thread and stale by however long since that thread last ran. Measured on 2026-09-09 against a live node
- * under steady load: 6 of 20 reads four seconds apart came back with no mark at all and the rest scattered
- * from 4 to 61 seconds, because each read landed on a different thread. A 60-second window cannot be tracked
- * that way at all.
- *
- * Numbers only, because that is what a mark is: a timestamp, a count, a version. Written under a per-thread
- * name and renamed, so a reader never sees half of one.
+ * A value every thread can read, one file per key. In module memory instead, 6 of 20 reads four seconds apart
+ * saw no mark and the rest scattered from 4 to 61 seconds, because each landed on a different thread.
  *
  * @param {string | undefined} dir @param {string} kind Distinguishes one consumer's marks from another's.
  * @returns {{ get: (key: string) => number | undefined, set: (key: string, value: number) => void }}
  */
 export function sharedMarks(dir, kind) {
 	if (!dir) {
-		// No directory, so nothing can be shared. This thread's own memory is what is left, and it is what a
-		// single-threaded caller needs anyway.
+		// Nothing to share through. This thread's memory is what is left, and all a single-threaded caller needs.
 		/** @type {Map<string, number>} */
 		const own = new Map();
 		return { get: (key) => own.get(key), set: (key, value) => void own.set(key, value) };
@@ -56,7 +36,7 @@ export function sharedMarks(dir, kind) {
 				const value = Number(readFileSync(path(key), 'utf-8').trim());
 				return Number.isFinite(value) && value > 0 ? value : undefined;
 			} catch {
-				// No mark yet, or an unreadable one. Either way this read has nothing behind it.
+				// No mark yet, or an unreadable one. This read has nothing behind it.
 				return undefined;
 			}
 		},
@@ -77,14 +57,8 @@ export function sharedMarks(dir, kind) {
 }
 
 /**
- * Which thread does the work, for work the node wants done once.
- *
- * An ungated timer in a component runs once per worker thread, so a series it sends is multiplied by the
- * thread count and every gauge in it reads high. This is the claim that stops that.
- *
- * A claim is a file holding `<holder> <timestamp>`. The holder refreshes it on every tick, which is what makes
- * takeover automatic: a thread that dies stops refreshing, and after `staleMs` the next tick from any other
- * thread takes it. There is no unlock path for that reason.
+ * Which thread does work the node wants done once: an ungated timer runs per thread and multiplies every
+ * gauge by the thread count. A `<holder> <timestamp>` file refreshed each tick, so takeover needs no unlock.
  *
  * @param {object} options
  * @param {string} options.dir @param {string} options.file Name of the claim, so two kinds of work do not share one.
@@ -112,38 +86,30 @@ export function claimSingleton({
 	}
 	const [heldBy, stamp] = held;
 	const at = Number(stamp);
-	// A stamp ahead of `now` reads as live, not as expired. Every claimant is a worker thread inside one host
-	// process and they share a clock, so the only way to see the future is a clock correction under a living
-	// holder; calling that stale would put a second worker on the job while the first still runs. It resolves
-	// itself on the holder's next tick, which restamps with the corrected clock.
+	// A stamp ahead of `now` is live, not expired: claimants share one clock, so the future means a correction
+	// under a living holder, and it resolves on that holder's next tick.
 	const live = Number.isFinite(at) && now - at < staleMs;
 	if (live && heldBy !== holder) return false;
 	try {
 		write(path, `${holder} ${now}\n`);
 	} catch {
-		// An unwritable pid directory is the guard's own problem to report, and it already does. Proceeding
-		// anyway would put every thread on the job, which is the one outcome the claim exists to prevent.
+		// An unwritable directory is reported elsewhere. Proceeding would put every thread on the job.
 		return false;
 	}
 	return true;
 }
 
 /**
- * How long a claim survives without a refresh: three cadences rather than one, so a holder that misses a tick
- * to a slow read does not hand the work to a second thread and double its output for one interval.
+ * How long a claim survives unrefreshed: three cadences, so a holder that misses one tick to a slow read does
+ * not hand the work over and double its output for an interval.
  *
  * @param {number} intervalSeconds
  */
 export const claimStaleMs = (intervalSeconds) => intervalSeconds * 3000;
 
 /**
- * What one supervised process costs, or null when this platform cannot say.
- *
- * Linux answers from /proc. macOS and Windows have no equivalent a Node process can read without either
- * spawning `ps`/`Get-CimInstance` on a schedule, which Harper's constrained spawn would make an operator
- * allowlist, or a native addon, which would end this package's "no install scripts" property. Reporting
- * nothing is correct there; reporting a Go process's own `memstats` would not be, because that is heap and not
- * resident memory. Measured 2026-09-09: one agent read 129 MiB resident while publishing `Sys` of 64.
+ * What one supervised process costs, or null where the platform cannot say. Only Linux answers without
+ * spawning on a schedule or a native addon; a Go process's own `memstats` is heap, measured 64 against 129.
  *
  * @param {number} pid @param {string} [platform] @param {(p: string) => string} [read]
  * @returns {{ rssBytes: number, threads: number } | null}
@@ -156,7 +122,7 @@ export function readProcess(pid, platform = process.platform, read = undefined) 
 	try {
 		status = readFile(`/proc/${pid}/status`);
 	} catch {
-		// The process went away between listing it and reading it, which is ordinary under chaos.
+		// Gone between listing and reading, which is ordinary under chaos.
 		return null;
 	}
 	const field = (/** @type {string} */ name) => {
@@ -169,10 +135,8 @@ export function readProcess(pid, platform = process.platform, read = undefined) 
 }
 
 /**
- * This process's own cost, which needs no /proc and is the same on every platform.
- *
- * The host is Node, so `process.memoryUsage().rss` is its real resident size. That is why the host is measured
- * everywhere and only the native processes beside it are not.
+ * This process's own cost, the same on every platform: the host is Node, so `memoryUsage().rss` is its real
+ * resident size, which is why only the native processes beside it go unmeasured.
  *
  * @param {NodeJS.Process} [self]
  */
@@ -188,8 +152,8 @@ export const REAPER_WATCH_MS = 60_000;
 const REAPER_BACKOFF_MAX_MS = 15 * 60_000;
 
 /**
- * A lock naming a real process, or undefined. readLock parses; this adds the one thing a supervisor needs
- * on top of it, which is that pid 0 is the claim-in-flight sentinel and identifies against nothing.
+ * A lock naming a real process, or undefined. readLock parses; this adds that pid 0 is the claim-in-flight
+ * sentinel and identifies against nothing.
  *
  * @param {string} file
  */
@@ -200,12 +164,8 @@ export function heldProcess(file) {
 }
 
 /**
- * The reaper as it is now, rather than as bootstrap left it.
- *
- * The guard builds its ReaperState once and a status endpoint copied it, so a reaper killed at 01:43 was
- * still reported started with its dead pid ten minutes later, and a chaos run recorded a recovery that
- * never happened. Processes already get this treatment through their verdicts; the reaper was the one
- * thing left reporting boot state.
+ * The reaper as it is now, not as bootstrap left it: the state is built once and a status endpoint copied it,
+ * so a reaper killed at 01:43 still read started with its dead pid ten minutes later.
  *
  * @param {Record<string, unknown> | undefined} reaper @param {string | undefined} pidDir
  * @param {string} [defaultName] Used only when the state carries no name of its own. A reaper state
@@ -214,13 +174,11 @@ export function heldProcess(file) {
 export function currentReaper(reaper, pidDir, defaultName) {
 	if (!reaper || !pidDir) return reaper;
 	const name = typeof reaper.name === 'string' ? reaper.name : defaultName;
-	// Nothing names the lock, so there is nothing to re-read it from. Returned unchanged rather than
-	// reported dead: this cannot tell a missing reaper from a missing name.
+	// Nothing names the lock. Returned unchanged rather than dead: a missing name is not a missing reaper.
 	if (!name) return reaper;
 	const held = heldProcess(join(pidDir, `${name}.pid`));
 	if (held && identifyPid(held.pid, held.argv) === 'match') {
-		// The pid too: a reaper that died and was replaced by another thread runs under a number this
-		// thread's boot state never saw.
+		// The pid too: a reaper another thread replaced runs under a number this boot state never saw.
 		return { ...reaper, started: true, pid: held.pid };
 	}
 	const why = !held
@@ -237,10 +195,8 @@ export function currentReaper(reaper, pidDir, defaultName) {
 }
 
 /**
- * Harper's own spawn keeps a pid file per process name under <root>/pids and, when the file names a pid
- * that answers kill(pid, 0), returns that pid instead of spawning. After a restart the kernel reissues
- * pids, and a thread of Harper itself answers for one, so the file has to go before the guard asks.
- * Removing it signals nothing. A file naming the real process, or a dead one, is Harper's to keep.
+ * Harper's spawn hands back the pid in <root>/pids/<name>.pid when it answers kill(pid, 0), and after a
+ * restart a thread of Harper itself answers for one. A file naming the real process, or a dead one, stays.
  *
  * @param {string | null} root
  * @param {Array<{ name: string; argv?: readonly string[]; script?: string }>} named
@@ -281,21 +237,8 @@ export function clearStaleHostPidFiles(root, named, log, label = 'process guard'
 }
 
 /**
- * What the node has, for a thread that has nothing.
- *
- * A constrained spawn hands back a pid it never identified, and the guard refuses one running something
- * else, so a thread can end with `started: false` while the node's process is up and healthy under another
- * thread. The refusal is a diagnostic, not the node's health, and a status endpoint answers "is this
- * running" for the node.
- *
- * A thread that watched its own process die re-reads for the opposite reason. `exited` is documented as
- * "true once this thread has seen it die", and it leaves `started` alone, because a deliberate stop is not
- * a failed start. Reading only `started` therefore published a dead process as running: a SIGTERM takes the
- * deliberate branch, which releases the lock and does not restart, and a status endpoint reported that
- * process started and verified for the five minutes it was gone.
- *
- * The second reading is gated on the guard, because the lock is the guard's record and no other supervisor
- * keeps one. Where the host supervises natively there is nothing to re-read and its answer is the node's.
+ * What the node has, for a thread that has nothing. A thread's own refusal is a diagnostic rather than the
+ * node's health, and a thread that watched its process die reads back for the opposite reason.
  *
  * @param {Record<string, any>} state @param {string | undefined} pidDir @param {string} [supervision]
  */
@@ -306,9 +249,8 @@ export function nodeProcess(state, pidDir, supervision = 'guard') {
 	if (!unstartedHere && !diedHere) return state;
 	const held = heldProcess(join(pidDir, `${state.name}.pid`));
 	if (!held || identifyPid(held.pid, held.argv) !== 'match')
-		// Nothing of this name is running on the node. For a thread that never started one that is already
-		// what the state says; for a thread whose own process died it is the correction. The dead pid stays:
-		// `started: false` says it is not running, and which pid died is what an operator reads the log for.
+		// Nothing of this name runs on the node. The dead pid stays: `started: false` says it is not running,
+		// and which pid died is what an operator reads the log for.
 		return diedHere ? { ...state, started: false } : state;
 	return {
 		...state,
@@ -316,8 +258,7 @@ export function nodeProcess(state, pidDir, supervision = 'guard') {
 		adopted: true,
 		exited: false,
 		pid: held.pid,
-		// No verdict has been taken against this pid by this thread, which is what makes the reader retake
-		// one rather than publish the refusal as a health state.
+		// No verdict against this pid from this thread, which makes the reader retake one.
 		verified: undefined,
 		verifyDetail: undefined,
 		verifiedPid: null,
@@ -327,13 +268,8 @@ export function nodeProcess(state, pidDir, supervision = 'guard') {
 }
 
 /**
- * Keep a reaper on the node.
- *
- * Nothing relaunched one before: chaos killed the reaper on a soak at 01:43 and the node ran without orphan
- * cleanup until the next restart forty minutes later, while the status reported it started. The check is a
- * lock read and one identification, so a thread that finds a healthy reaper has done almost nothing; only
- * an absent one reaches `relaunch`, which takes the same lock every thread contends for, so one thread
- * spawns and the rest adopt.
+ * Keep a reaper on the node. Chaos killed one at 01:43 and the node ran without orphan cleanup for forty
+ * minutes; the check is a lock read, and only an absent reaper reaches `relaunch` and its lock.
  *
  * @param {object} options
  * @param {string} options.pidDir @param {Record<string, unknown>} options.reaper
@@ -373,8 +309,7 @@ export function keepReaperAlive({
 				log.warn(`${label}: the reaper was gone and has been relaunched as pid ${now.pid}.`);
 				return 'relaunched';
 			}
-			// It did not come back. Widen the gap rather than spawn every minute against whatever is
-			// refusing, and say so once per attempt so the reason reaches a log an operator reads.
+			// It did not come back. Widen the gap rather than spawn every minute against whatever refuses.
 			wait = Math.min(wait * 2, REAPER_BACKOFF_MAX_MS);
 			backoffUntil = Date.now() + wait;
 			log.error(
