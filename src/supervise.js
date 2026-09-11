@@ -4,10 +4,10 @@
 import { accessSync, constants, existsSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
-import { argvOf, compareArgv, errorMessage, isAlive } from './identity.js';
+import { argvOf, compareArgv, isAlive } from './identity.js';
 // Which exits mean somebody shut it down lives in exit.js, so this file and a consumer's status endpoint
 // cannot disagree about the same signal. Restarting into one of these fights the operator.
-import { describeSpawnFailure, isDeliberate } from './exit.js';
+import { describeSpawnFailure, errorMessage, isDeliberate } from './exit.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 
 /** How long a spawn that came back without a pid gets to say why. Bounded because this blocks a start. */
@@ -66,7 +66,7 @@ export const DEFAULT_TUNING = { deathPollMs: 2000, restartMax: 5, restartBaseMs:
  * @property {Spawn} spawn
  * @property {number} version
  * @property {boolean} stopOrphans
- * @property {import('./log.js').Log} log
+ * @property {import('./host.js').Log} log
  * @property {number} claimTimeoutMs
  * @property {string[]} report
  * @property {Tuning} tuning

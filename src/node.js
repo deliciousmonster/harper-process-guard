@@ -8,10 +8,17 @@
 //
 // What the supervised processes cost is here for the same reason. A thread measures pids the node runs, not
 // pids it started, so the reader has to work from a number rather than from its own memory of a spawn.
+//
+// And the second half of the file is that same question asked of the processes themselves: a thread's own
+// memory of a spawn is not the node's state, so what it reports is read back off the locks rather than
+// remembered. A thread whose spawn was refused still has to say whether the node is running the process.
 
 import { readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { threadId } from 'node:worker_threads';
+
+import { argvOf, identify as identifyPid } from './identity.js';
+import { readLock } from './lock.js';
 
 /** Bytes per /proc kB field. */
 const KB = 1024;
@@ -172,4 +179,224 @@ export function readProcess(pid, platform = process.platform, read = undefined) 
 export function selfProcess(self = process) {
 	const { rss } = self.memoryUsage();
 	return { rssBytes: rss, threads: 0 };
+}
+
+// -- The processes, as the node has them rather than as one thread left them -------------------------------
+
+/** How often a thread checks the reaper is still there, and the longest it waits after a failed relaunch. */
+export const REAPER_WATCH_MS = 60_000;
+const REAPER_BACKOFF_MAX_MS = 15 * 60_000;
+
+/**
+ * A lock naming a real process, or undefined. readLock parses; this adds the one thing a supervisor needs
+ * on top of it, which is that pid 0 is the claim-in-flight sentinel and identifies against nothing.
+ *
+ * @param {string} file
+ */
+export function heldProcess(file) {
+	const lock = readLock(file);
+	if (!lock || !Number.isInteger(lock.pid) || lock.pid <= 0) return undefined;
+	return lock;
+}
+
+/**
+ * The reaper as it is now, rather than as bootstrap left it.
+ *
+ * The guard builds its ReaperState once and a status endpoint copied it, so a reaper killed at 01:43 was
+ * still reported started with its dead pid ten minutes later, and a chaos run recorded a recovery that
+ * never happened. Processes already get this treatment through their verdicts; the reaper was the one
+ * thing left reporting boot state.
+ *
+ * @param {Record<string, unknown> | undefined} reaper @param {string | undefined} pidDir
+ * @param {string} [defaultName] Used only when the state carries no name of its own. A reaper state
+ *   built by guard() always does, so this is the fallback rather than the usual path.
+ */
+export function currentReaper(reaper, pidDir, defaultName) {
+	if (!reaper || !pidDir) return reaper;
+	const name = typeof reaper.name === 'string' ? reaper.name : defaultName;
+	// Nothing names the lock, so there is nothing to re-read it from. Returned unchanged rather than
+	// reported dead: this cannot tell a missing reaper from a missing name.
+	if (!name) return reaper;
+	const held = heldProcess(join(pidDir, `${name}.pid`));
+	if (held && identifyPid(held.pid, held.argv) === 'match') {
+		// The pid too: a reaper that died and was replaced by another thread runs under a number this
+		// thread's boot state never saw.
+		return { ...reaper, started: true, pid: held.pid };
+	}
+	const why = !held
+		? `no lock for ${name} under ${pidDir}`
+		: argvOf(held.pid) === null
+			? `${name}'s lock names pid ${held.pid}, which nothing holds`
+			: `${name}'s lock names pid ${held.pid}, which is running something else`;
+	return {
+		...reaper,
+		started: false,
+		pid: undefined,
+		error: `${why}. Nothing is reaping this node's processes: if it dies without running its exit handlers, they outlive it.`,
+	};
+}
+
+/**
+ * Harper's own spawn keeps a pid file per process name under <root>/pids and, when the file names a pid
+ * that answers kill(pid, 0), returns that pid instead of spawning. After a restart the kernel reissues
+ * pids, and a thread of Harper itself answers for one, so the file has to go before the guard asks.
+ * Removing it signals nothing. A file naming the real process, or a dead one, is Harper's to keep.
+ *
+ * @param {string | null} root
+ * @param {Array<{ name: string; argv?: readonly string[]; script?: string }>} named
+ * @param {import('./host.js').Log} log
+ * @param {string} [label] How the component names itself in these lines. Defaults to this package.
+ */
+export function clearStaleHostPidFiles(root, named, log, label = 'process guard') {
+	if (!root) return;
+	for (const { name, argv, script } of named) {
+		const file = join(root, 'pids', `${name}.pid`);
+		let pid;
+		try {
+			pid = Number.parseInt(readFileSync(file, 'utf-8'), 10);
+		} catch {
+			continue;
+		}
+		if (!Number.isInteger(pid) || pid <= 0) continue;
+		const running = argvOf(pid);
+		if (running === null) continue;
+		const ours = argv
+			? identifyPid(pid, argv) === 'match'
+			: running.some((argument) => argument.endsWith(script ?? ' '));
+		if (ours) continue;
+		try {
+			unlinkSync(file);
+			log.warn(
+				`${label}: removed ${file}, the host's own pid file for ${name}: it named pid ${pid}, which ` +
+					`is running \`${running.join(' ')}\`, and the host would have handed that pid back as the ${name} ` +
+					`instead of starting one.`
+			);
+		} catch (error) {
+			log.error(
+				`${label}: could not remove ${file}, which names pid ${pid} running something else: ` +
+					`${error instanceof Error ? error.message : String(error)}. The host will hand that pid back as the ${name} rather than start one.`
+			);
+		}
+	}
+}
+
+/**
+ * What the node has, for a thread that has nothing.
+ *
+ * A constrained spawn hands back a pid it never identified, and the guard refuses one running something
+ * else, so a thread can end with `started: false` while the node's process is up and healthy under another
+ * thread. The refusal is a diagnostic, not the node's health, and a status endpoint answers "is this
+ * running" for the node.
+ *
+ * A thread that watched its own process die re-reads for the opposite reason. `exited` is documented as
+ * "true once this thread has seen it die", and it leaves `started` alone, because a deliberate stop is not
+ * a failed start. Reading only `started` therefore published a dead process as running: a SIGTERM takes the
+ * deliberate branch, which releases the lock and does not restart, and a status endpoint reported that
+ * process started and verified for the five minutes it was gone.
+ *
+ * The second reading is gated on the guard, because the lock is the guard's record and no other supervisor
+ * keeps one. Where the host supervises natively there is nothing to re-read and its answer is the node's.
+ *
+ * @param {Record<string, any>} state @param {string | undefined} pidDir @param {string} [supervision]
+ */
+export function nodeProcess(state, pidDir, supervision = 'guard') {
+	if (!state || !pidDir || !state.name) return state;
+	const unstartedHere = state.started === false;
+	const diedHere = state.exited === true && supervision === 'guard';
+	if (!unstartedHere && !diedHere) return state;
+	const held = heldProcess(join(pidDir, `${state.name}.pid`));
+	if (!held || identifyPid(held.pid, held.argv) !== 'match')
+		// Nothing of this name is running on the node. For a thread that never started one that is already
+		// what the state says; for a thread whose own process died it is the correction. The dead pid stays:
+		// `started: false` says it is not running, and which pid died is what an operator reads the log for.
+		return diedHere ? { ...state, started: false } : state;
+	return {
+		...state,
+		started: true,
+		adopted: true,
+		exited: false,
+		pid: held.pid,
+		// No verdict has been taken against this pid by this thread, which is what makes the reader retake
+		// one rather than publish the refusal as a health state.
+		verified: undefined,
+		verifyDetail: undefined,
+		verifiedPid: null,
+		error: undefined,
+		refused: state.error,
+	};
+}
+
+/**
+ * Keep a reaper on the node.
+ *
+ * Nothing relaunched one before: chaos killed the reaper on a soak at 01:43 and the node ran without orphan
+ * cleanup until the next restart forty minutes later, while the status reported it started. The check is a
+ * lock read and one identification, so a thread that finds a healthy reaper has done almost nothing; only
+ * an absent one reaches `relaunch`, which takes the same lock every thread contends for, so one thread
+ * spawns and the rest adopt.
+ *
+ * @param {object} options
+ * @param {string} options.pidDir @param {Record<string, unknown>} options.reaper
+ * @param {() => Promise<unknown>} options.relaunch @param {import('./host.js').Log} options.log
+ * @param {string} [options.label] @param {string} [options.reaperName]
+ * @param {number} [options.everyMs] @param {(fn: () => void, ms: number) => any} [options.setTimer]
+ * @returns {{ stop: () => void, tick: () => Promise<'present'|'relaunched'|'failed'|'backoff'> }}
+ */
+export function keepReaperAlive({
+	pidDir,
+	reaper,
+	relaunch,
+	log,
+	label = 'process guard',
+	reaperName = undefined,
+	everyMs = REAPER_WATCH_MS,
+	setTimer = setInterval,
+}) {
+	let backoffUntil = 0;
+	let wait = everyMs;
+	let running = false;
+
+	const tick = async () => {
+		// One relaunch at a time per thread: a spawn plus its lock claim can outlast the interval.
+		if (running) return 'present';
+		if (currentReaper(reaper, pidDir, reaperName)?.started) {
+			wait = everyMs;
+			return 'present';
+		}
+		if (Date.now() < backoffUntil) return 'backoff';
+		running = true;
+		try {
+			await relaunch();
+			const now = currentReaper(reaper, pidDir, reaperName);
+			if (now?.started) {
+				wait = everyMs;
+				log.warn(`${label}: the reaper was gone and has been relaunched as pid ${now.pid}.`);
+				return 'relaunched';
+			}
+			// It did not come back. Widen the gap rather than spawn every minute against whatever is
+			// refusing, and say so once per attempt so the reason reaches a log an operator reads.
+			wait = Math.min(wait * 2, REAPER_BACKOFF_MAX_MS);
+			backoffUntil = Date.now() + wait;
+			log.error(
+				`${label}: relaunching the reaper left none running; next attempt in ${Math.round(wait / 1000)}s. ${now?.error ?? ''}`
+			);
+			return 'failed';
+		} catch (error) {
+			wait = Math.min(wait * 2, REAPER_BACKOFF_MAX_MS);
+			backoffUntil = Date.now() + wait;
+			log.error(
+				`${label}: relaunching the reaper threw: ${error instanceof Error ? error.message : String(error)}. Next attempt in ${Math.round(wait / 1000)}s`
+			);
+			return 'failed';
+		} finally {
+			running = false;
+		}
+	};
+
+	const timer = setTimer(() => {
+		tick().catch(() => {});
+	}, everyMs);
+	// Never the reason a worker thread stays alive.
+	timer?.unref?.();
+	return { stop: () => clearInterval(timer), tick };
 }

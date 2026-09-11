@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { threadId } from 'node:worker_threads';
 
-import { errnoCode, errorMessage, identify, IDENTIFY_BUDGET_MS, isAlive } from './identity.js';
+import { identify, IDENTIFY_BUDGET_MS, isAlive } from './identity.js';
+import { errnoCode, errorMessage } from './exit.js';
 
 /** How long a thread waits before looking again at another thread's unfinished claim, which is one file read. */
 const CLAIM_POLL_MS = 2;

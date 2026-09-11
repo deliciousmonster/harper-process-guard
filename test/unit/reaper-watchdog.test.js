@@ -48,7 +48,7 @@ describe('keeping a reaper on the node', () => {
 
 	const watcher = (
 		/** @type {() => Promise<any>} */ relaunch,
-		/** @type {import('../../src/log.js').Log} */ log = quiet
+		/** @type {import('../../src/host.js').Log} */ log = quiet
 	) =>
 		keepReaperAlive({
 			pidDir: dir,

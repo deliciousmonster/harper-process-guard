@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { currentVerdict, neverStarted, retakeVerdict, takeVerdictAgainst } from '../../src/supervision.js';
+import { currentVerdict, neverStarted, retakeVerdict, takeVerdictAgainst } from '../../src/verdict.js';
 
 /** A state shaped the way the supervisor leaves one. */
 const running = (overrides = {}) => ({

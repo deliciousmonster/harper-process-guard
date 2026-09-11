@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { normaliseLog } from '../../src/log.js';
+import { normaliseLog } from '../../src/host.js';
 
 /** @param {...string} methods @returns {{ host: Record<string, any>, seen: string[][] }} */
 const recorder = (...methods) => {

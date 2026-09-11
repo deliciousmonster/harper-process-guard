@@ -5,6 +5,9 @@ import { execSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { setTimeout as delay } from 'node:timers/promises';
 
+// The error readers live with the other failure readings; exit.js imports nothing from here, so this is safe.
+import { errnoCode } from './exit.js';
+
 /**
  * What is known about a pid. 'unknown' is "not established", which is never "not ours".
  *
@@ -21,16 +24,6 @@ export const IDENTIFY_BUDGET_MS = process.platform === 'win32' ? CIM_TIMEOUT_MS 
 /** The two answers the win32 probe may print, so the script that writes them and the reader below are one protocol. */
 const LIVE = 'live';
 const GONE = 'gone';
-
-/** @param {unknown} error @returns {string | undefined} */
-export function errnoCode(error) {
-	return error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
-}
-
-/** @param {unknown} error @returns {string} */
-export function errorMessage(error) {
-	return error instanceof Error ? error.message : String(error);
-}
 
 /**
  * The win32 probe's answer, or null when it printed neither. 'gone' is "no such process"; 'live' with

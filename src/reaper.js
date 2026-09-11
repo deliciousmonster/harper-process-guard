@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 
-import { errorMessage, identify, isAlive, STOP_POLL_MS, waitWhileAlive } from './identity.js';
+import { identify, isAlive, STOP_POLL_MS, waitWhileAlive } from './identity.js';
+import { errorMessage } from './exit.js';
 import { readLock, unlinkQuietly } from './lock.js';
 
 const DEFAULT_WATCH_POLL_MS = 1000;

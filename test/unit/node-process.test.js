@@ -13,7 +13,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
 
-import { nodeProcess, retakeVerdict } from '../../src/supervision.js';
+import { nodeProcess } from '../../src/node.js';
+import { retakeVerdict } from '../../src/verdict.js';
 
 const NAME = 'datadog-agent';
 const DEAD_PID = 2 ** 22 - 7;

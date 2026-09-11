@@ -4,21 +4,12 @@
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 
-import { describeSpawnFailure } from './exit.js';
-import { errorMessage } from './identity.js';
-import {
-	clearStaleHostPidFiles,
-	guardDescriptors,
-	tagState,
-	keepReaperAlive,
-	knownReaperFields,
-	supervisesNatively,
-	unstarted,
-} from './supervision.js';
+import { describeSpawnFailure, errorMessage } from './exit.js';
+import { clearStaleHostPidFiles, keepReaperAlive } from './node.js';
 import { claimLock, commitLock, lockPath, readLock, releaseLock, safeLockWrite } from './lock.js';
 import { DEFAULT_TUNING, describeHandedBackPid, startFailure, superviseProcess } from './supervise.js';
 
-/** @typedef {import('./log.js').Log} Log */
+/** @typedef {import('./host.js').Log} Log */
 /** @typedef {import('./supervise.js').ProcessState} ProcessState */
 /** @typedef {import('./supervise.js').Spawn} Spawn */
 
@@ -71,26 +62,29 @@ const REAPER_SCRIPT = fileURLToPath(new URL('./reaper.js', import.meta.url));
 
 export { argvOf, identify } from './identity.js';
 export { describeExit, describeSpawnFailure } from './exit.js';
+export { currentVerdict, neverStarted, retakeVerdict, takeVerdictAgainst } from './verdict.js';
+export { createBinaryResolver, resolutionFailure } from './binary.js';
 export {
+	createHandleApplication,
+	hostRoot,
+	normaliseLog,
+	resolvePort,
+	watchForNeverCalled,
+	writeFiles,
+} from './host.js';
+export {
+	claimSingleton,
+	claimStaleMs,
 	clearStaleHostPidFiles,
 	currentReaper,
-	currentVerdict,
-	guardDescriptors,
 	heldProcess,
 	keepReaperAlive,
-	neverStarted,
 	nodeProcess,
+	readProcess,
 	REAPER_WATCH_MS,
-	retakeVerdict,
-	supervisesNatively,
-	takeVerdictAgainst,
-	unstarted,
-} from './supervision.js';
-export { normaliseLog } from './log.js';
-export { createHandleApplication, watchForNeverCalled } from './lifecycle.js';
-export { createBinaryResolver, resolutionFailure } from './binary.js';
-export { hostRoot, resolvePort, writeFiles } from './host.js';
-export { claimSingleton, claimStaleMs, readProcess, selfProcess, sharedMarks } from './node.js';
+	selfProcess,
+	sharedMarks,
+} from './node.js';
 export { parseJson, pollEndpoint, pollUnixSocket, tailFile, untraceWith } from './probe.js';
 
 /** Fingerprint of whatever forces replacement of a running process, as a number inside 2^31 so a host that parseInt()s it agrees. @param {...unknown} parts */
@@ -296,12 +290,69 @@ export async function guard({
 	};
 }
 
+// -- Choosing a supervisor, and the shapes both of them report ---------------------------------------------
+
+/** Whether the host supervises processes itself. No released Harper does; its Scope carries no such member. */
+export const supervisesNatively = (/** @type {any} */ scope) => typeof scope?.processes?.start === 'function';
+
+/**
+ * The state a supervisor never reached, in the shape both of them report. `started` is what answers "is it
+ * running": `exited: false` here means it never ran, not that it still does.
+ *
+ * @param {{ name: string, title?: string, kind?: string }} descriptor @param {string} [error]
+ */
+export const unstarted = (descriptor, error) => ({
+	name: descriptor.name,
+	title: descriptor.title,
+	kind: descriptor.kind,
+	started: false,
+	adopted: false,
+	exited: false,
+	restarts: 0,
+	error,
+});
+
+// What the NATIVE path publishes about the reaper, where the object comes from a host this package does not
+// ship and may carry anything. The guard's own reaper state is a documented shape and is published whole.
+const REAPER_FIELDS = ['name', 'started', 'adopted', 'error'];
+const knownReaperFields = (/** @type {any} */ reaper) =>
+	reaper &&
+	Object.fromEntries(
+		REAPER_FIELDS.filter((field) => reaper[field] !== undefined).map((field) => [field, reaper[field]])
+	);
+
+// Mutated, never copied: the guard writes this same object for the life of the node — a death, a restart, a
+// give-up — and a copy taken here freezes a status endpoint on what was true at boot.
+const tagState = (/** @type {any} */ state, /** @type {any} */ descriptor) =>
+	Object.assign(state, { name: descriptor.name, title: descriptor.title, kind: descriptor.kind });
+
+/**
+ * The guard's process descriptors from a consumer's own.
+ *
+ * A process that declares `env` gets it spread over this process's own, because naming `env` at all
+ * replaces the whole environment rather than adding to it, and credentials reach a child no other way. One
+ * that declares none is left without `spawnOptions`, so it inherits exactly as it would have.
+ *
+ * @param {readonly Record<string, any>[]} descriptors @param {NodeJS.ProcessEnv} [inherited]
+ */
+export function guardDescriptors(descriptors, inherited = process.env) {
+	return descriptors.map((descriptor) => ({
+		name: descriptor.name,
+		title: descriptor.title,
+		binaryPath: descriptor.command,
+		args: descriptor.args,
+		exitHint: descriptor.exitHint,
+		verify: descriptor.verify,
+		...(descriptor.env ? { spawnOptions: { env: { ...inherited, ...descriptor.env } } } : {}),
+	}));
+}
+
 /**
  * The host's own supervisor, one call per process. It writes any declared config files behind its own
  * sweep, which is why they are named on both paths: naming them on one alone lets the other spawn before
  * the files exist.
  *
- * @param {any} scope @param {import('./log.js').Log} log @param {string} label @param {string} kind
+ * @param {any} scope @param {import('./host.js').Log} log @param {string} label @param {string} kind
  */
 const hostSupervisor = (scope, log, label, kind) => {
 	const unusedNote =
@@ -347,13 +398,13 @@ const hostSupervisor = (scope, log, label, kind) => {
  * constrains.
  *
  * @param {object} options
- * @param {import('./log.js').Log} options.log @param {Spawn} options.spawn
+ * @param {import('./host.js').Log} options.log @param {Spawn} options.spawn
  * @param {string} options.label @param {string} options.reaperName
  * @param {(context: any) => void} [options.beforeStart] Run before anything spawns; where a consumer
  *   writes the config files its processes read, since on this path nothing else will.
  */
 const bundledSupervisor = (
-	/** @type {{log: import('./log.js').Log, spawn: Spawn, label: string, reaperName: string, beforeStart?: (c: any) => void}} */ {
+	/** @type {{log: import('./host.js').Log, spawn: Spawn, label: string, reaperName: string, beforeStart?: (c: any) => void}} */ {
 		log,
 		spawn,
 		label,
@@ -455,7 +506,7 @@ const bundledSupervisor = (
  *
  * @param {any} scope
  * @param {object} options
- * @param {import('./log.js').Log} options.log @param {Spawn} options.spawn
+ * @param {import('./host.js').Log} options.log @param {Spawn} options.spawn
  * @param {string} [options.label] How this component names itself in a log line.
  * @param {string} [options.reaperName] This component's own reaper lock name. Two components sharing a pid
  *   directory collide on the generic default, so a consumer states its own.

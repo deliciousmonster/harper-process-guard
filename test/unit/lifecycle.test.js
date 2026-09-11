@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createHandleApplication, watchForNeverCalled } from '../../src/lifecycle.js';
+import { createHandleApplication, watchForNeverCalled } from '../../src/host.js';
 
 const collector = () => {
 	/** @type {string[]} */

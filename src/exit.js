@@ -1,4 +1,5 @@
-// One reading per way a process can fail to run or stop running.
+// One reading per way a process can fail to run or stop running, from the two that only read an error's own
+// fields up to the one that decides whether a restart would fight an operator.
 //
 // This is the single source of truth for "was that a shutdown or a crash". supervise.js decides whether to
 // restart from it, and a consumer's status endpoint describes a death from it, so the two can never
@@ -7,6 +8,16 @@
 // reference to it.
 
 import { constants } from 'node:os';
+
+/** @param {unknown} error @returns {string | undefined} */
+export function errnoCode(error) {
+	return error instanceof Error && 'code' in error && typeof error.code === 'string' ? error.code : undefined;
+}
+
+/** @param {unknown} error @returns {string} */
+export function errorMessage(error) {
+	return error instanceof Error ? error.message : String(error);
+}
 
 // Signals a supervisor sends on the way down. Anything else reaching a child is a crash or an OOM kill, and
 // a Go process that never installed a handler exits with no code at all either way.
