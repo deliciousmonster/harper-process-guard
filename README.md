@@ -67,6 +67,20 @@ Every thread makes the same call. One starts the process; the rest join it and w
 
 **The reaper.** No in-process hook runs when a host is SIGKILLed, so the reaper is a detached process, launched only when `reaper` is passed. It polls the host pid once a second; once the host is gone it waits `graceMs` for a replacement host to record itself in `replacementPidFile`, then removes each lock and signals the pid it named if the command line still matches. It is spawned as `process.execPath` first and a bare `node` second, so a host that filters spawns has to permit one of those.
 
+## Beside the lock
+
+`guard()` is the centre of it, and around it is what two consumers each wrote for themselves before the second
+one proved it was not theirs. None of it knows what the supervised processes do.
+
+- **Choosing a supervisor.** `supervisorFor(scope, ...)` returns the host's own `scope.processes` where a build carries it and the guard otherwise, decided once so nothing downstream reads the scope twice and disagrees with the first answer. `clearStaleHostPidFiles` removes the host's own pid file where it names a pid something else now holds, which is how a restarted Harper hands a thread of itself back as the process.
+- **Finding the binary.** `createBinaryResolver` asks each platform package for a binary by filename and checks the filename that comes back, then falls back to a dev checkout's build output. A package published before a second binary existed answers every request with the first one, and that path exists.
+- **Waiting for it.** `pollEndpoint` and `pollUnixSocket` ask until something answers, backing off and stopping early on a `giveUp` for a process that has died. `untraceWith` is how a consumer running inside a traced application keeps its own startup probes from becoming errored client spans on the host's service. `tailFile` reads the end of a log, which is often the only evidence there is.
+- **Reading the host.** `hostRoot` reads the same boot-properties chain Harper reads for itself, because Harper exposes its root path to no component and one that guesses puts its locks under each worker's cwd. `resolvePort` refuses `8126tcp`, which `parseInt` reads as 8126. `writeFiles` is temp-and-rename, because every worker thread writes the same config files and a rereading process must see old or new.
+- **One node, many threads.** `claimSingleton` picks one thread to do periodic work, so a timer in a component sends one series instead of one per thread. `sharedMarks` is a small number every thread can read. `readProcess` and `selfProcess` are what the supervised processes cost, from `/proc` where there is one.
+- **Verdicts.** A consumer's own proof of health goes stale the moment a restart replaces the pid it was taken against. `takeVerdictAgainst` records which pid one is about, `currentVerdict` says so at read time rather than publishing a dead process's proof, and `retakeVerdict` takes a new one instead of reporting none.
+- **Exits.** `describeExit` separates a shutdown from a crash, and `supervise.js` restarts from the same reading a consumer's status endpoint reports, so the two cannot disagree about the same signal. `describeSpawnFailure` names ENOENT, EACCES and ENOEXEC, and leaves a host's own refusal in the host's own words.
+- **Lifecycle.** `normaliseLog` fills the levels a partial logger is missing. `createHandleApplication` and `watchForNeverCalled` catch a host that imports a component and never calls its plugin, which the component cannot observe from inside itself.
+
 ## Windows
 
 `process.kill` is `TerminateProcess` there: a process an operator stopped is indistinguishable from a crash and is restarted, and a reaper stopped that way leaves its own lock behind. A command-line lookup costs a PowerShell start, so liveness polls never take one; only a lock claim and a reap target pay for it.

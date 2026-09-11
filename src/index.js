@@ -74,16 +74,24 @@ export { describeExit, describeSpawnFailure } from './exit.js';
 export {
 	clearStaleHostPidFiles,
 	currentReaper,
+	currentVerdict,
 	guardDescriptors,
 	heldProcess,
 	keepReaperAlive,
+	neverStarted,
 	nodeProcess,
 	REAPER_WATCH_MS,
+	retakeVerdict,
 	supervisesNatively,
+	takeVerdictAgainst,
 	unstarted,
 } from './supervision.js';
 export { normaliseLog } from './log.js';
 export { createHandleApplication, watchForNeverCalled } from './lifecycle.js';
+export { createBinaryResolver, resolutionFailure } from './binary.js';
+export { hostRoot, resolvePort, writeFiles } from './host.js';
+export { claimSingleton, claimStaleMs, readProcess, selfProcess, sharedMarks } from './node.js';
+export { parseJson, pollEndpoint, pollUnixSocket, tailFile, untraceWith } from './probe.js';
 
 /** Fingerprint of whatever forces replacement of a running process, as a number inside 2^31 so a host that parseInt()s it agrees. @param {...unknown} parts */
 export function fingerprint(...parts) {

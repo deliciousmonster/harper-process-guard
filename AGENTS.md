@@ -21,13 +21,22 @@ A green suite is not a review. A change to `lock.js`, `supervise.js` or `reaper.
 
 ## Layout
 
-Five files under `src/`, ESM with `// @ts-check` and JSDoc, nothing built.
+Thirteen files under `src/`, ESM with `// @ts-check` and JSDoc, nothing built. The first five are the lock and
+what it arbitrates; the rest are what every consumer of it turned out to need before it could supervise
+anything at all, each one written inside a consumer first and moved here when a second one wanted it.
 
 - `identity.js`: one `inspect()` per pid answering liveness and command line together, one branch per platform. The Windows branch costs a PowerShell start, so `isAlive` never asks for the command line.
 - `lock.js`: the gate, `adjudicate()` (reads, changes nothing), and the writes: `claimLock`, `commitLock`, `releaseLock`. `safeLockWrite` turns a rejected or superseded write into a message.
 - `supervise.js`: start or join, watch, and answer a death by going back through the lock.
 - `reaper.js`: the detached script. SIGTERM or SIGINT to it unlinks its own lock first.
-- `index.js`: `guard()` and `fingerprint()`, the whole public surface. The reaper is launched before any `verify`: a probe can wait 30 seconds, and a host killed inside that window must not leave its processes behind.
+- `index.js`: `guard()`, `fingerprint()` and `supervisorFor()`, plus the re-exports that are the public surface. The reaper is launched before any `verify`: a probe can wait 30 seconds, and a host killed inside that window must not leave its processes behind.
+- `supervision.js`: what the node has rather than what one thread saw. `nodeProcess`, `currentReaper`, `keepReaperAlive`, `clearStaleHostPidFiles`, and the four verdict calls that stop a proof taken at boot being published about a process a restart replaced.
+- `exit.js`: one reading per way a process can fail to run or stop running. `describeExit` decides whether a restart would fight an operator, and `supervise.js` and a consumer's status endpoint both read it, so they cannot disagree about the same signal.
+- `binary.js`: asking each platform package for a binary by filename and checking the filename that comes back. A package published before a second binary existed answers every request with the first one, and that path exists.
+- `probe.js`: polling an endpoint or a unix socket until something answers, with a doubling backoff and a `giveUp` for a process that has died. `untraceWith` is how a consumer inside a traced application keeps its own probes out of the host's APM.
+- `host.js`: what Harper exposes to a component, which is nothing: `hostRoot` reads the same boot-properties chain Harper reads for itself, `resolvePort` refuses a value with a port inside it, `writeFiles` is temp-and-rename because every worker thread writes the same files.
+- `node.js`: the node has eight worker threads and a component that forgets it multiplies. `claimSingleton` picks one writer for periodic work, `sharedMarks` is a value every thread can read, `readProcess` is what one supervised process costs.
+- `log.js`, `lifecycle.js`: `normaliseLog` fills a partial logger, and `createHandleApplication` / `watchForNeverCalled` catch a host that imports a component and never calls its plugin, which the component cannot see from inside itself.
 
 Timings a test needs to wind down live on the context (`tuning`) or in `ReaperOptions`.
 

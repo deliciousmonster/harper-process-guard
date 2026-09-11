@@ -96,33 +96,59 @@ test('the source knows nothing about any particular consumer', () => {
 
 test('the public surface is what a consumer calls, and nothing else', async () => {
 	const surface = Object.keys(await import('../../src/index.js')).sort();
-	// Everything else is an implementation detail, and a narrow surface is what keeps it small enough
-	// to hold in one head. identify and argvOf are in because a host that keeps its own pid file per
-	// process name hands a stale one back as the process, and only the consumer knows that file's path.
-	// normaliseLog and the two lifecycle calls are in because every consumer was writing them for
-	// itself: guard() documents each log method as optional, and Harper importing a component without
-	// calling its plugin is a failure the component cannot see from inside. describeExit and
-	// describeSpawnFailure are in because supervise.js decides whether to restart from the same reading a
-	// consumer's status endpoint reports, and two copies of that judgement is two answers.
+	// Everything else is an implementation detail, and this list is the whole of what a consumer may call.
+	//
+	// The test is the argument for each name. Every one of these was written inside a consumer first and moved
+	// here for the same reason: it is about supervising processes on a Harper node, not about what those
+	// processes do. identify and argvOf, because a host that keeps its own pid file per process name hands a
+	// stale one back as the process and only the consumer knows that file's path. normaliseLog and the two
+	// lifecycle calls, because guard() documents each log method as optional and Harper importing a component
+	// without calling its plugin is a failure the component cannot see from inside itself. describeExit and
+	// describeSpawnFailure, because supervise.js decides whether to restart from the same reading a consumer's
+	// status endpoint reports, and two copies of that judgement is two answers. The verdict four, because a
+	// supervisor rewrites pid and restarts on the state object it already handed out. hostRoot and resolvePort,
+	// because Harper exposes neither to a component. The node three, because Harper runs eight worker threads
+	// and a component that forgets that multiplies whatever it does. probe and binary, because polling a
+	// process that has not bound its port yet, and finding the binary in a platform package, are the two things
+	// every consumer does before it can supervise anything at all.
 	assert.deepEqual(surface, [
 		'REAPER_WATCH_MS',
 		'argvOf',
+		'claimSingleton',
+		'claimStaleMs',
 		'clearStaleHostPidFiles',
+		'createBinaryResolver',
 		'createHandleApplication',
 		'currentReaper',
+		'currentVerdict',
 		'describeExit',
 		'describeSpawnFailure',
 		'fingerprint',
 		'guard',
 		'guardDescriptors',
 		'heldProcess',
+		'hostRoot',
 		'identify',
 		'keepReaperAlive',
+		'neverStarted',
 		'nodeProcess',
 		'normaliseLog',
+		'parseJson',
+		'pollEndpoint',
+		'pollUnixSocket',
+		'readProcess',
+		'resolutionFailure',
+		'resolvePort',
+		'retakeVerdict',
+		'selfProcess',
+		'sharedMarks',
 		'supervisesNatively',
 		'supervisorFor',
+		'tailFile',
+		'takeVerdictAgainst',
 		'unstarted',
+		'untraceWith',
 		'watchForNeverCalled',
+		'writeFiles',
 	]);
 });
