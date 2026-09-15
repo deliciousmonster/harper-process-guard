@@ -104,6 +104,10 @@ jobs:
       # can assert. The step therefore fails loudly and prints the exact command to run by hand, rather than
       # passing quietly and leaving `latest` wrong for another release.
       - name: Point latest at this release
+        env:
+          # OIDC covers `npm publish` and not `dist-tag add`: trusted-publisher runs on 2026-09-15 published
+          # with provenance and were then answered E401 on every tag write. A token is what moves the tag.
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -o pipefail
           name="$(node -p 'require("./package.json").name')"
