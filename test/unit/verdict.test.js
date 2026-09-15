@@ -141,6 +141,78 @@ test('a retake that fails is unverified, not unverdicted', async () => {
 	assert.equal(verdict.verifyDetail, 'nothing answered the receiver port');
 });
 
+// The 2026-09-15 defect. A refuted verdict was durable: staleVerdict only fires when the pid changes, and a
+// verdict of `false` taken against a pid that is still running is neither stale nor untaken, so the read path
+// handed back the same `false` for the life of the node. The security-agent's socket is created by system-probe
+// seconds after the security-agent's own process starts, and three of nine Harper workers polled first: those
+// three reported a healthy agent broken for twelve minutes while the other six reported it up.
+test('a verdict that said no is asked again, because what it proved was a moment and not the process', async () => {
+	const state = running({ verified: false, verifyDetail: 'nothing accepted on the socket yet' });
+	let polled = 0;
+	const verdict = await retakeVerdict(state, async () => {
+		polled++;
+		return { ok: true, detail: 'the socket accepts connections now' };
+	});
+	assert.equal(polled, 1, 'the pid never changed, and that is exactly the case that stayed false forever');
+	assert.equal(verdict.verified, true);
+	assert.match(verdict.verifyDetail, /accepts connections now/);
+});
+
+// The cost of the fix, refused. An agent that is genuinely down is the common case for a standing `false`, and
+// re-probing it on every request would put a poll on the critical path of every /DatadogStatus/ read, once per
+// process, on every Harper worker.
+test('NEGATIVE: a verdict that said no is not re-probed by every reader', async () => {
+	const state = running({ verified: false, verifyDetail: 'nothing answered' });
+	let polled = 0;
+	/** @type {() => Promise<{ok: boolean, detail: string}>} */
+	const verify = async () => {
+		polled++;
+		return { ok: false, detail: 'still nothing answered' };
+	};
+	let clock = 1_000;
+	const options = { now: () => clock, intervalMs: 10_000 };
+	await retakeVerdict(state, verify, options);
+	clock += 9_999;
+	await retakeVerdict(state, verify, options);
+	await retakeVerdict(state, verify, options);
+	assert.equal(polled, 1, 'three reads inside one interval must cost one probe');
+	assert.equal(state.verified, false, 'and the verdict they each read is still the refusal');
+});
+
+test('once the interval has passed the refusal is re-probed again', async () => {
+	const state = running({ verified: false, verifyDetail: 'nothing answered' });
+	let polled = 0;
+	/** @param {any} _s */
+	const verify = async (_s) => {
+		polled++;
+		return { ok: polled > 1, detail: polled > 1 ? 'answering now' : 'not yet' };
+	};
+	let clock = 1_000;
+	const options = { now: () => clock, intervalMs: 10_000 };
+	await retakeVerdict(state, verify, options);
+	clock += 10_000;
+	const verdict = await retakeVerdict(state, verify, options);
+	assert.equal(polled, 2);
+	assert.equal(verdict.verified, true, 'an agent that came up late must be able to be seen coming up');
+});
+
+// The proof is the only party that knows what a probe costs, and the two cases want different budgets: a boot
+// poll waits 30 s for a process spawned a moment ago, while a read-path retake is holding a status request open.
+// Handing every case the same call is what made the 30 s boot budget the retake budget too.
+test('the proof is told why it is being asked', async () => {
+	/** @type {(string | undefined)[]} */
+	const reasons = [];
+	/** @param {any} _s @param {any} context */
+	const verify = async (_s, context) => {
+		reasons.push(context?.reason);
+		return { ok: true, detail: 'up' };
+	};
+	await retakeVerdict(running({ verified: false }), verify);
+	await retakeVerdict(running({ pid: 200, verifiedPid: 100, restarts: 1 }), verify);
+	await retakeVerdict({ name: 'x', started: true, restarts: 0, pid: 300, verified: undefined }, verify);
+	assert.deepEqual(reasons, ['refuted', 'restarted', 'untaken']);
+});
+
 test('with no proof to run, the verdict is reported as it stands', async () => {
 	const verdict = await retakeVerdict(running({ pid: 200, verifiedPid: 100, restarts: 1 }), undefined);
 	assert.equal(verdict.verified, null);

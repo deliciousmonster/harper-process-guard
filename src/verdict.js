@@ -51,25 +51,61 @@ export const currentVerdict = (state) =>
 		: state;
 
 /**
- * Retake a stale verdict rather than reporting none: currentVerdict alone answers `verified: null` for the
- * life of the node, so one chaos restart left a status saying nothing had verified a healthy agent.
- *
- * @param {Record<string, any>} state @param {(state: any) => Promise<{ok: boolean, detail: string}>} [verify]
+ * How long a refuted verdict stands before the read path asks again. A retake costs the consumer a probe, and
+ * an agent that is genuinely down would otherwise make every status request pay one.
  */
-export async function retakeVerdict(state, verify) {
-	// Never taken counts too: a thread whose own spawn was refused carries the node's process and no verdict,
-	// and publishing "unverified" for that is the refusal masquerading as health.
-	const untaken = state?.started === true && state?.verified === undefined;
-	if (!verify || state?.started === false || (!staleVerdict(state) && !untaken)) return currentVerdict(state);
+export const RETAKE_INTERVAL_MS = 10_000;
+
+/**
+ * Why the verdict on `state` is being retaken, or null when it stands as it is.
+ *
+ * @param {Record<string, any>} state @param {number} now @param {number} intervalMs
+ * @returns {'restarted' | 'untaken' | 'refuted' | null}
+ */
+function retakeReason(state, now, intervalMs) {
+	// A process this thread never started has no proof to retake; anything answering its port is a stranger.
+	if (state?.started === false) return null;
+	if (staleVerdict(state)) return 'restarted';
+	// A thread whose own spawn was refused carries the node's process and no verdict, and publishing
+	// "unverified" for that is the refusal masquerading as health.
+	if (state?.started === true && state?.verified === undefined) return 'untaken';
+	// A proof of health outlives the request that took it: the process proved itself and still holds the pid
+	// it proved itself under. A proof of failure does not, because the thing it proves is usually a boot race
+	// rather than a property of the process. The security-agent's socket is created by system-probe seconds
+	// after the security-agent's own process starts, and on 2026-09-15 three of nine Harper workers polled
+	// before it existed: each of those three reported a healthy agent broken for the twelve minutes the
+	// container went on living, while the other six reported it up, because nothing here would ask again.
+	const asked = state?.verifiedAt;
+	if (state?.verified === false && (typeof asked !== 'number' || now - asked >= intervalMs)) return 'refuted';
+	return null;
+}
+
+/**
+ * Retake a verdict that no longer describes the running process rather than reporting none: currentVerdict
+ * alone answers `verified: null` for the life of the node, so one chaos restart left a status saying nothing
+ * had verified a healthy agent. `reason` reaches the proof, which is the only party that knows what a probe
+ * costs: a boot poll can wait 30 s for a process that has just been spawned, and a read-path retake is
+ * holding a status request open while it waits.
+ *
+ * @param {Record<string, any>} state
+ * @param {(state: any, context?: {reason: string}) => Promise<{ok: boolean, detail: string}>} [verify]
+ * @param {{now?: () => number, intervalMs?: number}} [options]
+ */
+export async function retakeVerdict(state, verify, { now = Date.now, intervalMs = RETAKE_INTERVAL_MS } = {}) {
+	const reason = retakeReason(state, now(), intervalMs);
+	if (!verify || reason === null) return currentVerdict(state);
 	// Onto the supervisor's own object, the way the first verdict is. A copy served the previous detail beside
 	// the new pid, one read in three on 2026-09-09.
 	try {
-		const { ok, detail } = await verify(state);
+		const { ok, detail } = await verify(state, { reason });
 		state.verified = ok;
 		state.verifyDetail = detail;
 	} catch (error) {
 		state.verified = false;
 		state.verifyDetail = `retaking the verdict against pid ${state.pid} threw: ${error instanceof Error ? error.message : String(error)}`;
 	}
+	// After the proof, not before: the interval is between answers, and a proof that waits out its own budget
+	// would otherwise be re-entered by every request that arrived while it ran.
+	state.verifiedAt = now();
 	return state;
 }
