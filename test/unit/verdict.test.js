@@ -199,6 +199,27 @@ test('once the interval has passed the refusal is re-probed again', async () => 
 // The proof is the only party that knows what a probe costs, and the two cases want different budgets: a boot
 // poll waits 30 s for a process spawned a moment ago, while a read-path retake is holding a status request open.
 // Handing every case the same call is what made the 30 s boot budget the retake budget too.
+// verifiedAt is a wall clock and can therefore read as being in the future: an NTP correction moves Date.now()
+// backwards, and a refusal recorded before the jump would then never reach its interval. That restores the very
+// bug this rate limit sits inside, so a clock that went backwards costs one extra probe instead.
+test('a clock that went backwards does not make the refusal permanent again', async () => {
+	const state = running({ verified: false, verifyDetail: 'nothing answered' });
+	let polled = 0;
+	/** @type {() => Promise<{ok: boolean, detail: string}>} */
+	const verify = async () => {
+		polled++;
+		return { ok: true, detail: 'answering now' };
+	};
+	let clock = 100_000;
+	const options = { now: () => clock, intervalMs: 10_000 };
+	await retakeVerdict(state, verify, options);
+	state.verified = false;
+	clock -= 30_000;
+	const verdict = await retakeVerdict(state, verify, options);
+	assert.equal(polled, 2, 'a verifiedAt in the future must not read as an interval that has not elapsed');
+	assert.equal(verdict.verified, true);
+});
+
 test('the proof is told why it is being asked', async () => {
 	/** @type {(string | undefined)[]} */
 	const reasons = [];

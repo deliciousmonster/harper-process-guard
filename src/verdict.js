@@ -76,8 +76,13 @@ function retakeReason(state, now, intervalMs) {
 	// before it existed: each of those three reported a healthy agent broken for the twelve minutes the
 	// container went on living, while the other six reported it up, because nothing here would ask again.
 	const asked = state?.verifiedAt;
-	if (state?.verified === false && (typeof asked !== 'number' || now - asked >= intervalMs)) return 'refuted';
-	return null;
+	if (state?.verified !== false) return null;
+	if (typeof asked !== 'number') return 'refuted';
+	// `verifiedAt` is a wall clock, so it can be read as being in the future: an NTP correction moves Date.now()
+	// backwards, and until it caught up the interval would never elapse and the refusal would be permanent
+	// again. A clock that went backwards costs one extra probe, which is the direction to fail in.
+	const elapsed = now - asked;
+	return elapsed < 0 || elapsed >= intervalMs ? 'refuted' : null;
 }
 
 /**
