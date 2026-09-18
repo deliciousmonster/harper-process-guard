@@ -38,17 +38,21 @@ export const neverStarted = (state) =>
  *
  * @param {Record<string, any>} state
  */
-export const currentVerdict = (state) =>
-	staleVerdict(state)
-		? {
-				...state,
-				verified: null,
-				verifyDetail:
-					`the last verdict was taken against pid ${state.verifiedPid}, which this node has since ` +
-					`restarted ${state.restarts} time(s) as pid ${state.pid}. Nothing has verified the process now ` +
-					`running; what the dead one proved was: ${state.verifyDetail}`,
-			}
-		: state;
+export const currentVerdict = (state) => {
+	if (!staleVerdict(state)) return state;
+	// Only when the host kept a count. `restarts` is this package's own field and a host supervising
+	// natively may not set it, and an operator reading "restarted undefined time(s)" learns nothing except
+	// that something here is broken. The sentence has to stand without it.
+	const times = typeof state.restarts === 'number' ? ` ${state.restarts} time(s)` : '';
+	return {
+		...state,
+		verified: null,
+		verifyDetail:
+			`the last verdict was taken against pid ${state.verifiedPid}, which this node has since ` +
+			`restarted${times} as pid ${state.pid}. Nothing has verified the process now ` +
+			`running; what the dead one proved was: ${state.verifyDetail}`,
+	};
+};
 
 /**
  * How long a refuted verdict stands before the read path asks again. A retake costs the consumer a probe, and

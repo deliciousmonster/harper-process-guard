@@ -50,6 +50,21 @@ test('NEGATIVE: a verdict taken against a replaced pid is not reported as curren
 	assert.match(verdict.verifyDetail, /what the dead one proved was: it serves expvar/);
 });
 
+// `restarts` is this package's own field and a host supervising natively need not keep one. The sentence used
+// to interpolate it unguarded, so such a host published "restarted undefined time(s)" to an operator, which
+// says nothing except that something here is broken. Staleness is decided by verifiedPid alone, so this is
+// reachable without any count at all.
+test('a stale verdict reads correctly on a host that keeps no restart count', () => {
+	const noCount = running({ pid: 200, verifiedPid: 100 });
+	delete noCount.restarts;
+	assert.ok(!('restarts' in noCount), 'the state under test must carry no count at all');
+	const verdict = currentVerdict(noCount);
+	assert.equal(verdict.verified, null, 'the verdict is still stale without a count');
+	assert.doesNotMatch(verdict.verifyDetail, /undefined/, 'an absent count must not reach an operator');
+	assert.match(verdict.verifyDetail, /which this node has since restarted as pid 200/);
+	assert.match(verdict.verifyDetail, /taken against pid 100/);
+});
+
 // Written back onto the supervisor's own object rather than onto a copy. A copy looked right and was not: the
 // next reader re-derives staleness from that same object, and a retake it cannot see is one it does again.
 // The fixture's old verdict is the opposite of the new one, so a write to a copy is visible here.
