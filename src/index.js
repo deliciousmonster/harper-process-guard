@@ -354,6 +354,15 @@ const hostSupervisor = (scope, log, label, kind) => {
 		kind,
 		/** @param {readonly any[]} descriptors @param {any} context */
 		async start(descriptors, { configFiles, fingerprintParts }) {
+			// Re-checked here, not trusted from the branch: supervisorFor chose this path because the host had a
+			// `processes.start` when it was asked, and a host that loses it between then and now would otherwise
+			// surface as `Cannot read properties of undefined (reading 'start')` from inside this package.
+			if (typeof scope?.processes?.start !== 'function') {
+				throw new Error(
+					`${label}: this host no longer exposes scope.processes.start, so nothing can supervise the ` +
+						`declared processes. A Harper without it needs the bundled guard, which this call chose not to use.`
+				);
+			}
 			log.warn(`${label}: ${unusedNote}`);
 			const processes = await Promise.all(
 				descriptors.map((descriptor) =>
@@ -508,6 +517,15 @@ export function supervisorFor(
 	{ log, spawn, label = 'process guard', reaperName = DEFAULT_REAPER_NAME, beforeStart, nativeKind = 'host' }
 ) {
 	if (supervisesNatively(scope)) return hostSupervisor(scope, log, label, nativeKind);
+	// Unreachable while this package ships both paths, and deliberately explicit anyway: a build that strips the
+	// bundled supervisor for a patched-Harper-only install would otherwise fall through to the native path,
+	// report `kind` for a host that supervises nothing, and throw a TypeError on the first start.
+	if (typeof bundledSupervisor !== 'function') {
+		throw new Error(
+			`${label}: this host does not expose scope.processes and this build carries no bundled supervisor, ` +
+				`so nothing can supervise the declared processes. Install a build that carries one.`
+		);
+	}
 	return bundledSupervisor(
 		/** @type {any} */ ({ log, spawn, label, reaperName, ...(beforeStart ? { beforeStart } : {}) })
 	);
