@@ -108,6 +108,18 @@ describe('what the node has, for a thread that has nothing', () => {
 		const state = refusedState();
 		assert.equal(nodeProcess(state, undefined), state);
 	});
+
+	// The directory and the format are both the bundled guard's. A host supervising natively writes its own
+	// locks, in its own shape, somewhere else, and keeps live state that needs no lock read at all. Reading
+	// one anyway is how a plugin came to publish a confident verdict about a process it had never seen.
+	it('NEGATIVE: reads no lock at all when the host supervises natively, even one that would match', () => {
+		lock(child.pid, childArgv);
+		const state = refusedState();
+		assert.equal(nodeProcess(state, dir, 'harper'), state, 'a native host keeps its own state');
+		assert.equal(nodeProcess(state, dir, 'host'), state);
+		// And the same lock still adopts on the path this function was written for
+		assert.equal(nodeProcess(state, dir, 'guard').started, true);
+	});
 });
 
 // A thread that watched its own agent die is the other side of the same question. The guard's `exited` is

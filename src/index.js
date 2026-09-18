@@ -309,15 +309,6 @@ export const unstarted = (descriptor, error) => ({
 	error,
 });
 
-// What the NATIVE path publishes about the reaper, where the object comes from a host this package does not
-// ship and may carry anything. The guard's own reaper state is a documented shape and is published whole.
-const REAPER_FIELDS = ['name', 'started', 'adopted', 'error'];
-const knownReaperFields = (/** @type {any} */ reaper) =>
-	reaper &&
-	Object.fromEntries(
-		REAPER_FIELDS.filter((field) => reaper[field] !== undefined).map((field) => [field, reaper[field]])
-	);
-
 // Mutated, never copied: the guard writes this same object for the life of the node — a death, a restart, a
 // give-up — and a copy taken here freezes a status endpoint on what was true at boot.
 const tagState = (/** @type {any} */ state, /** @type {any} */ descriptor) =>
@@ -390,7 +381,10 @@ const hostSupervisor = (scope, log, label, kind) => {
 						)
 				)
 			);
-			return { processes, reaper: knownReaperFields(scope.processes.reaper), report: [unusedNote] };
+			// Whole and uncopied, for the reason tagState gives above. Filtering this to a known field list
+			// dropped the reaper's pid, which is what a status endpoint publishes for an operator and what
+			// chaos testing kills, and dropped `exited`, which on this path is the death signal itself.
+			return { processes, reaper: scope.processes.reaper, report: [unusedNote] };
 		},
 	};
 };

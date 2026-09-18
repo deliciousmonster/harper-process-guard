@@ -21,10 +21,12 @@ const options = (extra = {}) => ({ log: silent, spawn, label: 'probe', reaperNam
  * A host exposing the native surface: the duck-type is `processes.start` being callable and nothing more.
  * `processes` is declared optional so a test can take it away, which is the case the refusal exists for.
  *
- * @param {(descriptor: any) => Promise<any>} [start]
- * @returns {{ processes: { start: (descriptor: any) => Promise<any>, reaper: undefined } | undefined }}
+ * @param {(descriptor: any) => Promise<any>} [start] @param {any} [reaper]
+ * @returns {{ processes: { start: (descriptor: any) => Promise<any>, reaper: any } | undefined }}
  */
-const nativeScope = (start = async () => ({ started: true })) => ({ processes: { start, reaper: undefined } });
+const nativeScope = (start = async () => ({ started: true }), /** @type {any} */ reaper = undefined) => ({
+	processes: { start, reaper },
+});
 
 test('a host with no scope.processes gets the bundled guard', () => {
 	assert.equal(supervisesNatively({}), false);
@@ -115,4 +117,42 @@ test('a native start that rejects becomes an unstarted state rather than taking 
 	assert.equal(processes[1].started, false);
 	assert.equal(processes[1].name, 'bad');
 	assert.ok(processes[1].error, 'the failure is carried on the state, not lost');
+});
+
+// The native reaper used to be copied through a four-field allowlist on its way out of here, on the reasoning
+// that a host this package does not ship may carry anything. It cost both fields that matter. `pid` is what a
+// status endpoint publishes for an operator and what chaos testing kills, so a harness that kills the reaper
+// ran `kill -9 undefined`; `exited` is the native path's death signal, and dropping it left the consumer
+// re-deriving liveness from a lock file this package did not write. The copy was also the one place the
+// package froze a state its own comment says is mutated for the life of the node.
+test('the native reaper is published whole, as the same object the host goes on mutating', async () => {
+	/** @type {Record<string, any>} */
+	const reaper = { name: 'probe-reaper', started: true, adopted: false, pid: 991, exited: false, host: 'extra' };
+	const scope = nativeScope(async () => ({ started: true }), reaper);
+	const supervisor = supervisorFor(scope, options({ nativeKind: 'harper' }));
+	const { reaper: published } = await supervisor.start(
+		[{ name: 'agent', title: 'agent', command: '/bin/true', args: [] }],
+		{ configFiles: {}, fingerprintParts: ['v1'] }
+	);
+
+	assert.equal(published, reaper, 'a copy freezes a status endpoint on what was true at boot');
+	assert.equal(published.pid, 991, 'the field an operator needs to find the process');
+	assert.equal(published.exited, false, 'and the one that carries its death');
+	assert.equal(published.host, 'extra', 'a host field this package does not know is not this package to drop');
+
+	// The host mutates its own state in place, which is the whole reason it is not copied here
+	reaper.started = false;
+	reaper.exited = true;
+	reaper.error = 'the reaper was terminated by SIGKILL';
+	assert.equal(published.started, false);
+	assert.equal(published.error, 'the reaper was terminated by SIGKILL');
+});
+
+test('a host with no reaper publishes none, rather than an empty object', async () => {
+	const supervisor = supervisorFor(nativeScope(), options({ nativeKind: 'harper' }));
+	const { reaper } = await supervisor.start([{ name: 'a', title: 'a', command: '/bin/true', args: [] }], {
+		configFiles: {},
+		fingerprintParts: ['v1'],
+	});
+	assert.equal(reaper, undefined);
 });

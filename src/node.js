@@ -244,6 +244,10 @@ export function clearStaleHostPidFiles(root, named, log, label = 'process guard'
  */
 export function nodeProcess(state, pidDir, supervision = 'guard') {
 	if (!state || !pidDir || !state.name) return state;
+	// These are the bundled guard's own locks, in its own format, under its own directory. A host that
+	// supervises natively keeps live state instead, and reading a lock this package did not write produced
+	// a confident verdict about a process it had never seen.
+	if (supervision !== 'guard') return state;
 	const unstartedHere = state.started === false;
 	const diedHere = state.exited === true && supervision === 'guard';
 	if (!unstartedHere && !diedHere) return state;
