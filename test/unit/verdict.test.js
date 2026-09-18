@@ -55,8 +55,10 @@ test('NEGATIVE: a verdict taken against a replaced pid is not reported as curren
 // says nothing except that something here is broken. Staleness is decided by verifiedPid alone, so this is
 // reachable without any count at all.
 test('a stale verdict reads correctly on a host that keeps no restart count', () => {
-	const noCount = running({ pid: 200, verifiedPid: 100 });
-	delete noCount.restarts;
+	// Destructured away rather than deleted: `delete` on a property the fixture declares is a type error,
+	// and the rest object is exactly the shape a host that keeps no count publishes.
+	const { restarts, ...noCount } = running({ pid: 200, verifiedPid: 100 });
+	assert.strictEqual(restarts, 0, 'the fixture supplies a count, which the state under test must not carry');
 	assert.ok(!('restarts' in noCount), 'the state under test must carry no count at all');
 	const verdict = currentVerdict(noCount);
 	assert.equal(verdict.verified, null, 'the verdict is still stale without a count');
